@@ -44,6 +44,20 @@ CRITICAL TECHNICAL DETAILS:
    * Validation against broker limits
    * Scaling sequence preservation
 
+4. Risk Management:
+   * Total Loss Monitoring:
+     - Continuously tracks floating losses in Phase 2
+     - Compares against TotalLosses parameter
+     - Triggers emergency closure when exceeded
+   * Emergency Closure Process:
+     - Updates all TPs to current market price
+     - Forces immediate trade closure
+     - Resets to Phase 1 with hold time
+   * Loss Calculation:
+     - Sums all negative profits
+     - Only considers Phase 2 trades
+     - Uses absolute values for consistency
+
 ADDITIONAL CRITICAL TECHNICAL DETAILS:
 
 1. Trade Sequence Dependencies:
@@ -360,6 +374,7 @@ input int    TradeHoldTime = 60;          // Hold time after profit (seconds)
 input string DailySchedule = "09:00-17:00"; // Trading hours (format: "HH:MM-HH:MM")
 input bool   EnableDailySchedule = true;   // Enable/Disable daily schedule
 input int    MaxOpenTrades = 5;           // Maximum number of open trades allowed
+input double TotalLosses = 100;           // Maximum allowed total losses in Phase 2 (in account currency)
 
 // Global Variables
 int g_magicNumber = 123456;
@@ -782,6 +797,9 @@ ENUM_ORDER_TYPE GetLastTradeType()
 */
 void ManagePhase2()
 {
+    // Add risk management check at the start of Phase 2 management
+    CheckTotalLosses();
+    
     // Check if maximum trades limit is reached
     int currentTrades = CountEATrades();
     if(currentTrades >= MaxOpenTrades)
@@ -1394,4 +1412,83 @@ bool IsTradeContextBusy()
     if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
         return true;
     return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check total losses and manage risk                                 |
+//+------------------------------------------------------------------+
+/*
+* CheckTotalLosses
+* Purpose: Monitor total floating losses in Phase 2
+* Behavior:
+*   - Calculates total floating losses for Phase 2 trades
+*   - If losses exceed TotalLosses parameter, closes all trades
+*   - Updates all TPs to current market price for immediate closure
+* Returns: void
+* Usage: Called during Phase 2 management
+*/
+void CheckTotalLosses()
+{
+    if(g_inPhase1)
+        return;
+        
+    double totalLoss = 0;
+    
+    // Calculate total floating losses
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            if(profit < 0)
+                totalLoss += MathAbs(profit);
+        }
+    }
+    
+    // Check if total losses exceed threshold
+    if(totalLoss > TotalLosses)
+    {
+        string alertMessage = StringFormat("WARNING: Total losses (%.2f) exceeded maximum allowed (%.2f).\nEA will be stopped for protection!", totalLoss, TotalLosses);
+        
+        // Log the event
+        LogAction("Risk Management", alertMessage);
+        
+        // Show popup alert to user
+        Alert(alertMessage);
+        MessageBox(alertMessage, "Risk Management - EA Stopped", MB_ICONEXCLAMATION);
+        
+        // Close all positions with market price
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = PositionGetTicket(i);
+            if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+            {
+                ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
+                double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
+                                                             : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                
+                MqlTradeRequest request = {};
+                MqlTradeResult result = {};
+                
+                request.action = TRADE_ACTION_SLTP;
+                request.position = ticket;
+                request.symbol = _Symbol;
+                request.tp = currentPrice;
+                
+                bool success = OrderSend(request, result);
+                if(success && result.retcode == TRADE_RETCODE_DONE)
+                {
+                    LogAction("Emergency Position Close", StringFormat("Ticket: %d, New TP: %.5f", ticket, currentPrice));
+                }
+                else
+                {
+                    LogError("Emergency Position Close", GetLastError());
+                }
+            }
+        }
+        
+        // Stop the EA
+        ExpertRemove();
+    }
 } 
