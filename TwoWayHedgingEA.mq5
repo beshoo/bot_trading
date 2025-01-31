@@ -1163,16 +1163,21 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double volume, string comment)
     
     if(success && result.retcode == TRADE_RETCODE_DONE)
     {
+        // Always update g_lastTradeVolume on successful trade
         g_lastTradeVolume = volume;
-        g_noMoneyErrorLogged = false;  // Reset on successful trade
+        g_noMoneyErrorLogged = false;
+        
+        LogAction("Volume Tracking", StringFormat("Updated g_lastTradeVolume to %.2f after %s trade", 
+                 volume, type == ORDER_TYPE_BUY ? "BUY" : "SELL"));
+                 
         LogTradeAction("Trade Opened", result.order, volume, price, tp, comment);
         
         // Log additional position details
         if(PositionSelectByTicket(result.order))
         {
             ulong positionID = PositionGetInteger(POSITION_IDENTIFIER);
-            LogAction("Position Details", StringFormat("Type: %s, PositionID: %d", 
-                     type == ORDER_TYPE_BUY ? "BUY" : "SELL", positionID));
+            LogAction("Position Details", StringFormat("Type: %s, PositionID: %d, Volume: %.2f", 
+                     type == ORDER_TYPE_BUY ? "BUY" : "SELL", positionID, volume));
         }
         return true;
     }
@@ -1525,19 +1530,23 @@ bool ShouldScaleIn(ulong ticket)
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
-        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.1f points", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, FixedDistance, priceMove));
+        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.1f points, LastVolume: %.2f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, FixedDistance, priceMove, g_lastTradeVolume));
         lastLogTime = TimeCurrent();
     }
     
     // Check if price has moved enough points in the correct direction
     if(priceMove >= FixedDistance)
     {
-        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance));
+        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points, LastVolume: %.2f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance, g_lastTradeVolume));
                  
         // Calculate new volume with proper scaling percentage
+        // Correct formula: current volume * (ScalePercent/100.0)
         double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
+        
+        LogAction("Volume Calculation", StringFormat("LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
+                 g_lastTradeVolume, ScalePercent, newVolume));
         
         // Validate volume against broker limits
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1559,6 +1568,8 @@ bool ShouldScaleIn(ulong ticket)
         {
             g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
             g_lastScalePrice = currentPrice;  // Update last scale price ONLY after successful trade
+            LogAction("Scale Success", StringFormat("Type: %s, NewVolume: %.2f, LastVolume updated", 
+                     type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
             return true;
         }
     }
