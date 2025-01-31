@@ -1318,24 +1318,29 @@ bool ShouldScaleIn(ulong ticket)
         return false;  // Don't scale immediately after initialization
     }
 
-    // Calculate price movement in points (1 point = 0.00001 for 5 digit broker)
+    // Get point value and digits
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double points_multiplier = (digits == 3 || digits == 5) ? 10.0 : 1.0;
+    
+    // Calculate price movement in points
     double priceMove = 0;
     if(type == ORDER_TYPE_BUY)
     {
         // For BUY, we want price to move DOWN from last scale price
-        priceMove = NormalizeDouble((g_lastScalePrice - currentPrice) * 100000, 0);  // Convert to points
+        priceMove = NormalizeDouble((g_lastScalePrice - currentPrice) / (point * points_multiplier), 1);
     }
     else
     {
         // For SELL, we want price to move UP from last scale price
-        priceMove = NormalizeDouble((currentPrice - g_lastScalePrice) * 100000, 0);  // Convert to points
+        priceMove = NormalizeDouble((currentPrice - g_lastScalePrice) / (point * points_multiplier), 1);
     }
     
     // Log price movement for debugging (only once per minute to avoid log spam)
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
-        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.0f points", 
+        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.1f points", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, FixedDistance, priceMove));
         lastLogTime = TimeCurrent();
     }
@@ -1343,7 +1348,7 @@ bool ShouldScaleIn(ulong ticket)
     // Check if price has moved enough points in the correct direction
     if(priceMove >= FixedDistance)
     {
-        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.0f points, Required: %d points", 
+        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance));
                  
         // Update last scale price ONLY if we're actually going to scale
