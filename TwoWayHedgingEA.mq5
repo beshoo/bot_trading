@@ -371,6 +371,7 @@ static bool g_lastUpdateFailed = false;        // For TP update failures
 static bool g_noMoneyErrorLogged = false;      // For no money errors
 static bool g_posModifyErrorLogged = false;    // For position modification errors
 static datetime g_lastErrorLogTime = 0;        // To control error log frequency
+static double g_lastScalePrice = 0;  // Track the price of last scale in
 
 //+------------------------------------------------------------------+
 //| Logging Functions                                                  |
@@ -768,14 +769,18 @@ void ManagePhase2()
     
     ulong lastTicket = GetLastTradeTicket();
     if(lastTicket == 0)
+    {
+        g_lastScalePrice = 0;  // Reset last scale price when no trades exist
         return;
-        
+    }
+    
     // Check if last trade hit TP
     if(IsTradeClosedInProfit(lastTicket))
     {
         LogAction("Trade Closed in Profit", StringFormat("Ticket: %d", lastTicket));
         g_lastProfitTime = TimeCurrent();
         g_inPhase1 = true;
+        g_lastScalePrice = 0;  // Reset last scale price when returning to Phase 1
         LogPhaseChange(true, CountEATrades());
         return;
     }
@@ -1275,11 +1280,33 @@ bool ShouldScaleIn(ulong ticket)
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-                                                  
+
+    // Initialize last scale price if it's zero
+    if(g_lastScalePrice == 0)
+        g_lastScalePrice = openPrice;
+
+    // Calculate the required price movement
+    double requiredMove = FixedDistance * _Point;
+    
+    // Check if price has moved enough from the last scale price
     if(type == ORDER_TYPE_BUY)
-        return (openPrice - currentPrice) >= FixedDistance * _Point;
-    else
-        return (currentPrice - openPrice) >= FixedDistance * _Point;
+    {
+        if((g_lastScalePrice - currentPrice) >= requiredMove)
+        {
+            g_lastScalePrice = currentPrice;  // Update last scale price
+            return true;
+        }
+    }
+    else  // SELL
+    {
+        if((currentPrice - g_lastScalePrice) >= requiredMove)
+        {
+            g_lastScalePrice = currentPrice;  // Update last scale price
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 /*
