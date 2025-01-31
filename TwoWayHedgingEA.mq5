@@ -400,7 +400,7 @@ input int    FixedDistance = 30;          // Distance for scaling in points
 input int    ScalePercent = 100;          // Scaling percentage
 input int    TradeHoldTime = 60;          // Hold time after profit (seconds)
 input string DailySchedule = "09:00-17:00"; // Trading hours (format: "HH:MM-HH:MM")
-input bool   EnableDailySchedule = true;   // Enable/Disable daily schedule
+input bool   EnableDailySchedule = false;   // Enable/Disable daily schedule
 input int    MaxOpenTrades = 5;           // Maximum number of open trades allowed
 input double TotalLosses = 100;           // Maximum allowed total losses in Phase 2 (in account currency)
 
@@ -678,6 +678,30 @@ int OnInit()
         ForceTPSync();
     }
     
+    // Initialize g_lastTradeVolume based on existing trades
+    g_lastTradeVolume = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            double volume = PositionGetDouble(POSITION_VOLUME);
+            if(volume > g_lastTradeVolume)
+                g_lastTradeVolume = volume;
+        }
+    }
+    
+    // Only set to StartingVolume if we have no trades
+    if(g_lastTradeVolume == 0)
+    {
+        g_lastTradeVolume = StartingVolume;
+        LogAction("Volume Initialization", "No existing trades - using StartingVolume");
+    }
+    else
+    {
+        LogAction("Volume Initialization", StringFormat("Found existing trade volume: %.2f", g_lastTradeVolume));
+    }
+    
     LogAction("EA Initialized", StringFormat("Magic Number: %d", g_magicNumber));
     PrintScalingSequence();
     
@@ -760,20 +784,23 @@ void OnTick()
         return;
         
     // Check hold time after profit
-    if(TimeCurrent() - g_lastProfitTime < TradeHoldTime)
+    if(g_lastProfitTime > 0 && TimeCurrent() - g_lastProfitTime < TradeHoldTime)
     {
-        static bool holdTimeWarningLogged = false;
-        if(!holdTimeWarningLogged)
+        static datetime lastHoldTimeLog = 0;
+        if(TimeCurrent() - lastHoldTimeLog >= 60)  // Log only once per minute
         {
-            LogAction("Hold Time Active", StringFormat("Waiting for %d seconds after last profit", TradeHoldTime));
-            holdTimeWarningLogged = true;
+            LogAction("Hold Time Active", StringFormat("Waiting for %d seconds after Phase 2 profit", TradeHoldTime));
+            lastHoldTimeLog = TimeCurrent();
         }
         return;
     }
     
-    // Reset the hold time warning flag
-    static bool holdTimeWarningLogged = false;
-    holdTimeWarningLogged = false;
+    // Reset hold time logging flag when hold time expires
+    if(g_lastProfitTime > 0 && TimeCurrent() - g_lastProfitTime >= TradeHoldTime)
+    {
+        g_lastProfitTime = 0;  // Reset the profit time
+        LogAction("Hold Time Complete", "Resuming trading");
+    }
     
     // Check for manual trade closure
     static int lastTradeCount = 0;
@@ -821,10 +848,11 @@ void OnTick()
             if(currentTradeCount == 0)
             {
                 g_inPhase1 = true;
-                g_lastProfitTime = TimeCurrent();
+                g_lastProfitTime = TimeCurrent();  // Set hold time when Phase 2 completes
                 g_lastScalePrice = 0;
                 g_lastTradeVolume = StartingVolume;
                 LogAction("Phase Reset", "No trades remaining, resetting to Phase 1");
+                return;  // Return here to prevent immediate trade opening
             }
             else
             {
@@ -849,28 +877,44 @@ void OnTick()
     
     lastTradeCount = currentTradeCount;
     
-    // Main trading logic with proper TP management
-    if(g_inPhase1)
+    // Add hold time check before starting Phase 1 trades
+    if(g_inPhase1 && CountEATrades() == 0)
     {
-        UpdateAllTakeProfiles();
+        // Check if we're still in hold time
+        if(g_lastProfitTime > 0 && TimeCurrent() - g_lastProfitTime < TradeHoldTime)
+        {
+            return;  // Don't open new trades during hold time
+        }
+        
+        LogAction("Starting Phase 1", "Opening initial trades");
+        // Main trading logic with proper TP management
         ManagePhase1();
     }
     else
     {
-        // In Phase 2, sync TPs first, then manage trading
-        if(currentTradeCount > 0)
+        // Main trading logic with proper TP management
+        if(g_inPhase1)
         {
-            ForceTPSync();  // Force sync every tick in Phase 2
-            Sleep(50);  // Small delay after sync
-            ManagePhase2();
+            UpdateAllTakeProfiles();
+            ManagePhase1();
         }
         else
         {
-            // If we're in Phase 2 but have no trades, reset to Phase 1
-            g_inPhase1 = true;
-            g_lastScalePrice = 0;
-            g_lastTradeVolume = StartingVolume;
-            LogAction("Phase Reset", "No trades detected, resetting to Phase 1");
+            // In Phase 2, sync TPs first, then manage trading
+            if(currentTradeCount > 0)
+            {
+                ForceTPSync();  // Force sync every tick in Phase 2
+                Sleep(50);  // Small delay after sync
+                ManagePhase2();
+            }
+            else
+            {
+                // If we're in Phase 2 but have no trades, reset to Phase 1
+                g_inPhase1 = true;
+                g_lastScalePrice = 0;
+                g_lastTradeVolume = StartingVolume;
+                LogAction("Phase Reset", "No trades detected, resetting to Phase 1");
+            }
         }
     }
 }
@@ -995,7 +1039,14 @@ void ManagePhase2()
     if(IsTradeClosedInProfit(lastTicket))
     {
         LogAction("Trade Closed in Profit", StringFormat("Ticket: %d", lastTicket));
-        g_lastProfitTime = TimeCurrent();
+        
+        // Check if this was the last trade of Phase 2 (all trades closed)
+        if(CountEATrades() == 0)
+        {
+            g_lastProfitTime = TimeCurrent();
+            LogAction("Phase 2 Complete", "Setting hold time after all trades closed");
+        }
+        
         g_inPhase1 = true;
         g_lastScalePrice = 0;  // Reset last scale price when returning to Phase 1
         LogPhaseChange(true, CountEATrades());
@@ -1030,6 +1081,10 @@ void ManagePhase2()
         {
             if(OpenTrade(type, newVolume, "Scale_In"))
             {
+                g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
+                g_lastScalePrice = PositionGetDouble(POSITION_PRICE_OPEN);  // Update last scale price ONLY after successful trade
+                LogAction("Scale Success", StringFormat("Type: %s, NewVolume: %.2f, LastVolume updated", 
+                         type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
                 Sleep(50);  // Small delay after trade
                 ForceTPSync();  // Force sync immediately after new scale trade
             }
@@ -1465,7 +1520,6 @@ bool IsTradeClosedInProfit(ulong ticket)
             if(profit > 0)
             {
                 LogTradeClose(ticket, profit);
-                g_lastProfitTime = TimeCurrent(); // Set the hold time when profit is confirmed
                 return true;
             }
             return false;
@@ -1570,7 +1624,35 @@ bool ShouldScaleIn(ulong ticket)
             g_lastScalePrice = currentPrice;  // Update last scale price ONLY after successful trade
             LogAction("Scale Success", StringFormat("Type: %s, NewVolume: %.2f, LastVolume updated", 
                      type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
+            Sleep(50);  // Small delay after trade
+            ForceTPSync();  // Force sync immediately after new scale trade
             return true;
+        }
+    }
+    
+    // Add safety check for zero volume
+    if(g_lastTradeVolume == 0)
+    {
+        // Only reset to StartingVolume if we have no trades
+        if(CountEATrades() == 0)
+        {
+            LogAction("Scale Error", "Last trade volume is zero - no trades exist, using StartingVolume");
+            g_lastTradeVolume = StartingVolume;
+        }
+        else
+        {
+            LogAction("Scale Error", "Last trade volume is zero but trades exist - attempting to recover volume");
+            // Try to recover volume from existing trades
+            for(int i = PositionsTotal() - 1; i >= 0; i--)
+            {
+                ulong ticket = PositionGetTicket(i);
+                if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+                {
+                    double volume = PositionGetDouble(POSITION_VOLUME);
+                    if(volume > g_lastTradeVolume)
+                        g_lastTradeVolume = volume;
+                }
+            }
         }
     }
     
