@@ -811,7 +811,7 @@ void ManagePhase2()
         {
             if(OpenTrade(type, newVolume, "Scale_In"))
             {
-                Sleep(1000);  // Increase delay after trade to ensure proper processing
+                Sleep(50);  // Increase delay after trade to ensure proper processing
                 UpdateAllTakeProfiles();
             }
         }
@@ -1295,8 +1295,8 @@ bool ShouldScaleIn(ulong ticket)
     
     // Calculate actual price movement from last scale price
     double actualMove = (type == ORDER_TYPE_BUY) 
-                       ? g_lastScalePrice - currentPrice  // For BUY, we want price to go down
-                       : currentPrice - g_lastScalePrice; // For SELL, we want price to go up
+                       ? MathAbs(g_lastScalePrice - currentPrice)  // For BUY, we want absolute movement
+                       : MathAbs(currentPrice - g_lastScalePrice); // For SELL, we want absolute movement
     
     // Log price movement for debugging
     static datetime lastLogTime = 0;
@@ -1314,8 +1314,16 @@ bool ShouldScaleIn(ulong ticket)
         static datetime lastScaleTime = 0;
         datetime currentTime = TimeCurrent();
         
-        // Ensure at least 2 seconds between scales
-        if(currentTime - lastScaleTime < 2)
+        // Ensure at least 5 seconds between scales
+        if(currentTime - lastScaleTime < 5)
+            return false;
+            
+        // For BUY trades, only scale if price moved down
+        if(type == ORDER_TYPE_BUY && currentPrice >= g_lastScalePrice)
+            return false;
+            
+        // For SELL trades, only scale if price moved up
+        if(type == ORDER_TYPE_SELL && currentPrice <= g_lastScalePrice)
             return false;
             
         LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.5f, Required: %.5f", 
