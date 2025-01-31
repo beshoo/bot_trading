@@ -811,7 +811,7 @@ void ManagePhase2()
         {
             if(OpenTrade(type, newVolume, "Scale_In"))
             {
-                Sleep(100);  // Small delay to ensure trade is fully processed
+                Sleep(1000);  // Increase delay after trade to ensure proper processing
                 UpdateAllTakeProfiles();
             }
         }
@@ -1283,27 +1283,48 @@ bool ShouldScaleIn(ulong ticket)
 
     // Initialize last scale price if it's zero
     if(g_lastScalePrice == 0)
+    {
         g_lastScalePrice = openPrice;
+        LogAction("Scale Price Initialized", StringFormat("Type: %s, Price: %.5f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice));
+        return false;  // Don't scale immediately after initialization
+    }
 
     // Calculate the required price movement
     double requiredMove = FixedDistance * _Point;
     
-    // Check if price has moved enough from the last scale price
-    if(type == ORDER_TYPE_BUY)
+    // Calculate actual price movement from last scale price
+    double actualMove = (type == ORDER_TYPE_BUY) 
+                       ? g_lastScalePrice - currentPrice  // For BUY, we want price to go down
+                       : currentPrice - g_lastScalePrice; // For SELL, we want price to go up
+    
+    // Log price movement for debugging
+    static datetime lastLogTime = 0;
+    if(TimeCurrent() - lastLogTime >= 60)  // Log once per minute
     {
-        if((g_lastScalePrice - currentPrice) >= requiredMove)
-        {
-            g_lastScalePrice = currentPrice;  // Update last scale price
-            return true;
-        }
+        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %.5f, Actual: %.5f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, requiredMove, actualMove));
+        lastLogTime = TimeCurrent();
     }
-    else  // SELL
+    
+    // Check if price has moved enough from the last scale price
+    if(actualMove >= requiredMove)
     {
-        if((currentPrice - g_lastScalePrice) >= requiredMove)
-        {
-            g_lastScalePrice = currentPrice;  // Update last scale price
-            return true;
-        }
+        // Add a small delay to prevent rapid scaling
+        static datetime lastScaleTime = 0;
+        datetime currentTime = TimeCurrent();
+        
+        // Ensure at least 2 seconds between scales
+        if(currentTime - lastScaleTime < 2)
+            return false;
+            
+        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.5f, Required: %.5f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", actualMove, requiredMove));
+                 
+        // Update last scale price and time ONLY if we're actually going to scale
+        g_lastScalePrice = currentPrice;
+        lastScaleTime = currentTime;
+        return true;
     }
     
     return false;
