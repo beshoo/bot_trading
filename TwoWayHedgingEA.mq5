@@ -786,22 +786,27 @@ void OnTick()
         {
             // In Phase 1, if a trade is closed, switch to Phase 2 and prepare for scaling
             g_inPhase1 = false;
-            g_lastTradeVolume = StartingVolume;  // Reset for proper scaling
             
-            // Get the remaining trade's type for scaling
+            // Get the remaining trade's type and volume for scaling
             for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
                 ulong ticket = PositionGetTicket(i);
                 if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
                 {
                     ENUM_ORDER_TYPE remainingType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
-                    double newVolume = NormalizeDouble(g_lastTradeVolume + (g_lastTradeVolume * ScalePercent / 100), 2);
+                    double remainingVolume = PositionGetDouble(POSITION_VOLUME);
+                    g_lastTradeVolume = remainingVolume;  // Use the remaining trade's volume for scaling
                     
-                    LogAction("Phase Change", "Trade closed in Phase 1, switching to Phase 2");
+                    // Calculate new volume with proper scaling
+                    double newVolume = NormalizeDouble(g_lastTradeVolume * (1 + ScalePercent/100.0), 2);
+                    
+                    LogAction("Phase Change", StringFormat("Trade closed in Phase 1, switching to Phase 2. Current Volume: %.2f, Next Scale: %.2f", 
+                             g_lastTradeVolume, newVolume));
                     
                     // Open new trade in the same direction as the remaining trade
                     if(OpenTrade(remainingType, newVolume, "Scale_In"))
                     {
+                        g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
                         Sleep(50);  // Small delay to ensure new trade is processed
                         ForceTPSync();  // Force sync immediately after new scale trade
                     }
@@ -822,8 +827,20 @@ void OnTick()
             }
             else
             {
-                // Still in Phase 2, recalculate TP for remaining trades
-                LogAction("Phase 2 Trade Closed", "Recalculating TPs for remaining trades");
+                // Still in Phase 2, find the largest volume among remaining trades
+                double maxVolume = 0;
+                for(int i = PositionsTotal() - 1; i >= 0; i--)
+                {
+                    ulong ticket = PositionGetTicket(i);
+                    if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+                    {
+                        double volume = PositionGetDouble(POSITION_VOLUME);
+                        if(volume > maxVolume)
+                            maxVolume = volume;
+                    }
+                }
+                g_lastTradeVolume = maxVolume;  // Update last trade volume to the largest remaining volume
+                LogAction("Phase 2 Trade Closed", StringFormat("Recalculating TPs for remaining trades. Current Volume: %.2f", g_lastTradeVolume));
                 ForceTPSync();
             }
         }
@@ -1499,9 +1516,18 @@ bool ShouldScaleIn(ulong ticket)
         LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance));
                  
+        // Calculate new volume with proper scaling
+        double newVolume = NormalizeDouble(g_lastTradeVolume * (1 + ScalePercent/100.0), 2);
+        
         // Update last scale price ONLY if we're actually going to scale
         g_lastScalePrice = currentPrice;
-        return true;
+        
+        // Open new trade with scaled volume
+        if(OpenTrade(type, newVolume, "Scale_In"))
+        {
+            g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
+            return true;
+        }
     }
     
     return false;
