@@ -419,6 +419,7 @@ static int g_lastKnownCounterTradeTP = 0;  // Track last known TP setting
 static double g_lastSyncedTP = 0;  // Track the last synced TP value
 static datetime g_lastTPCheck = 0;  // Track when we last checked TPs
 static datetime g_lastTPUpdateLog = 0;  // Track when we last logged a TP update message
+double g_lastKnownGoodTP = 0;  // Store the last known good TP value
 
 //+------------------------------------------------------------------+
 //| Logging Functions                                                  |
@@ -628,16 +629,92 @@ void LogParameterUpdate(string paramName, string oldValue, string newValue)
 */
 int OnInit()
 {
+    // Reset all static variables
+    g_lastKnownCounterTradeTP = 0;
+    g_lastUpdateFailed = false;
+    g_posModifyErrorLogged = false;
+    g_maxTradesWarningLogged = false;
+    g_noMoneyErrorLogged = false;
+    g_lastErrorLogTime = 0;
+    g_lastScalePrice = 0;
+    g_lastSyncedTP = 0;
+    g_lastTPCheck = 0;
+    g_lastTPUpdateLog = 0;
+    g_lastProfitTime = 0;
+    g_lastTradeVolume = 0;
+    
     // Disable manual trading on chart
     ChartSetInteger(0, CHART_SHOW_TRADE_LEVELS, true);
     ChartSetInteger(0, CHART_DRAG_TRADE_LEVELS, false);
     
-    LogAction("EA Initialized", StringFormat("Magic Number: %d", g_magicNumber));
+    // Print current state
+    int totalTrades = CountEATrades();
+    Print("OnInit - Current state:");
+    Print("Total EA trades: ", totalTrades);
     
-    // Print initial scaling sequence
+    // Determine initial phase based on trades
+    g_inPhase1 = IsInPhase1();
+    Print("Current Phase: ", g_inPhase1 ? "Phase 1" : "Phase 2");
+    
+    // Check all trades and their details
+    Print("Current trades details:");
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            double volume = PositionGetDouble(POSITION_VOLUME);
+            double tp = PositionGetDouble(POSITION_TP);
+            string type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+            string comment = PositionGetString(POSITION_COMMENT);
+            Print("Trade ", ticket, " - Type: ", type, ", Volume: ", volume, ", TP: ", tp, ", Comment: ", comment);
+        }
+    }
+    
+    // If in Phase 2, force TP sync
+    if(!g_inPhase1 && totalTrades > 0)  // Changed condition to sync if any trades exist in Phase 2
+    {
+        Print("In Phase 2 with trades - forcing TP sync...");
+        ForceTPSync();
+    }
+    
+    LogAction("EA Initialized", StringFormat("Magic Number: %d", g_magicNumber));
     PrintScalingSequence();
     
     return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                   |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Clear all static variables
+    g_lastKnownCounterTradeTP = 0;
+    g_lastUpdateFailed = false;
+    g_posModifyErrorLogged = false;
+    g_maxTradesWarningLogged = false;
+    g_noMoneyErrorLogged = false;
+    g_lastErrorLogTime = 0;
+    g_lastScalePrice = 0;
+    g_lastSyncedTP = 0;
+    g_lastTPCheck = 0;
+    g_lastTPUpdateLog = 0;
+    
+    string reasonStr = "";
+    switch(reason)
+    {
+        case REASON_PROGRAM:     reasonStr = "Program"; break;
+        case REASON_REMOVE:      reasonStr = "Removed"; break;
+        case REASON_RECOMPILE:   reasonStr = "Recompiled"; break;
+        case REASON_CHARTCHANGE: reasonStr = "Chart changed"; break;
+        case REASON_CHARTCLOSE:  reasonStr = "Chart closed"; break;
+        case REASON_PARAMETERS:  reasonStr = "Parameters changed"; break;
+        case REASON_ACCOUNT:     reasonStr = "Account changed"; break;
+        default:                 reasonStr = "Unknown"; break;
+    }
+    
+    LogAction("EA Deinitialized", StringFormat("Reason: %s", reasonStr));
 }
 
 //+------------------------------------------------------------------+
@@ -701,42 +778,83 @@ void OnTick()
     static int lastTradeCount = 0;
     int currentTradeCount = CountEATrades();
     
+    // Handle trade count changes
     if(currentTradeCount < lastTradeCount)
     {
-        // Trade was closed (manually or by TP)
-        g_lastProfitTime = TimeCurrent();
-        g_inPhase1 = true;
-        g_lastScalePrice = 0;
-        
-        // Find the largest volume among remaining trades to maintain proper scaling
-        double maxVolume = 0;
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        // Trade was closed
+        if(g_inPhase1)
         {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+            // In Phase 1, if a trade is closed, switch to Phase 2 and prepare for scaling
+            g_inPhase1 = false;
+            g_lastTradeVolume = StartingVolume;  // Reset for proper scaling
+            
+            // Get the remaining trade's type for scaling
+            for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
-                double volume = PositionGetDouble(POSITION_VOLUME);
-                if(volume > maxVolume)
-                    maxVolume = volume;
+                ulong ticket = PositionGetTicket(i);
+                if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+                {
+                    ENUM_ORDER_TYPE remainingType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
+                    double newVolume = NormalizeDouble(g_lastTradeVolume + (g_lastTradeVolume * ScalePercent / 100), 2);
+                    
+                    LogAction("Phase Change", "Trade closed in Phase 1, switching to Phase 2");
+                    
+                    // Open new trade in the same direction as the remaining trade
+                    if(OpenTrade(remainingType, newVolume, "Scale_In"))
+                    {
+                        Sleep(50);  // Small delay to ensure new trade is processed
+                        ForceTPSync();  // Force sync immediately after new scale trade
+                    }
+                    break;
+                }
             }
         }
-        // Update last trade volume to maintain proper scaling sequence
-        g_lastTradeVolume = (maxVolume > 0) ? maxVolume : StartingVolume;
-        
-        LogAction("Trade Count Changed", StringFormat("Resetting to Phase 1 and applying hold time. Last known volume: %.2f", g_lastTradeVolume));
-        lastTradeCount = currentTradeCount;
-        return;
+        else
+        {
+            // In Phase 2, only reset to Phase 1 if we have no trades left
+            if(currentTradeCount == 0)
+            {
+                g_inPhase1 = true;
+                g_lastProfitTime = TimeCurrent();
+                g_lastScalePrice = 0;
+                g_lastTradeVolume = StartingVolume;
+                LogAction("Phase Reset", "No trades remaining, resetting to Phase 1");
+            }
+            else
+            {
+                // Still in Phase 2, recalculate TP for remaining trades
+                LogAction("Phase 2 Trade Closed", "Recalculating TPs for remaining trades");
+                ForceTPSync();
+            }
+        }
     }
+    
     lastTradeCount = currentTradeCount;
     
-    // Update TPs for existing trades if needed
-    UpdateAllTakeProfiles();
-    
-    // Main trading logic
+    // Main trading logic with proper TP management
     if(g_inPhase1)
+    {
+        UpdateAllTakeProfiles();
         ManagePhase1();
+    }
     else
-        ManagePhase2();
+    {
+        // In Phase 2, sync TPs first, then manage trading
+        if(currentTradeCount > 0)
+        {
+            ForceTPSync();  // Force sync every tick in Phase 2
+            Sleep(50);  // Small delay after sync
+            ManagePhase2();
+        }
+        else
+        {
+            // If we're in Phase 2 but have no trades, reset to Phase 1
+            g_inPhase1 = true;
+            g_lastScalePrice = 0;
+            g_lastTradeVolume = StartingVolume;
+            LogAction("Phase Reset", "No trades detected, resetting to Phase 1");
+        }
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -782,30 +900,17 @@ void ManagePhase1()
     if(totalTrades == 0)
     {
         LogAction("Starting Phase 1", "Opening initial trades");
-        // Open initial buy and sell trades
+        // Open initial buy and sell trades with Phase1 comment
         OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
         OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
         g_lastTradeVolume = StartingVolume;
     }
-    else if(totalTrades == 1)
+    else if(!IsInPhase1() && totalTrades >= 2)
     {
-        // Get the remaining trade's type
-        ulong lastTicket = GetLastTradeTicket();
-        if(PositionSelectByTicket(lastTicket))
-        {
-            LogPhaseChange(false, totalTrades);
-            // One trade hit TP, switch to Phase 2
-            g_inPhase1 = false;
-            double newVolume = NormalizeDouble(g_lastTradeVolume + (g_lastTradeVolume * ScalePercent / 100), 2);
-            
-            // Get the type of the remaining trade and scale in that direction
-            ENUM_ORDER_TYPE remainingType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
-            LogAction("Phase 2 Start", StringFormat("Remaining trade type: %s, Scaling in same direction", 
-                     remainingType == ORDER_TYPE_BUY ? "BUY" : "SELL"));
-            
-            // Open new trade in the same direction as the remaining trade
-            OpenTrade(remainingType, newVolume, "Counter_Trade");
-        }
+        // Switch to Phase 2 if we're not in Phase 1 and have enough trades
+        LogPhaseChange(false, totalTrades);
+        g_inPhase1 = false;
+        ForceTPSync();  // Sync TPs when entering Phase 2
     }
 }
 
@@ -905,13 +1010,12 @@ void ManagePhase2()
         {
             if(OpenTrade(type, newVolume, "Scale_In"))
             {
-                Sleep(50);  // Increase delay after trade to ensure proper processing
-                UpdateAllTakeProfiles();
+                Sleep(50);  // Small delay after trade
+                ForceTPSync();  // Force sync immediately after new scale trade
             }
         }
     }
 }
-
 
 //+------------------------------------------------------------------+
 //| Open new trade with enhanced error handling                        |
@@ -1077,6 +1181,7 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double volume, string comment)
 void UpdateAllTakeProfiles()
 {
     static double lastKnownTP = 0;
+    static bool parameterChangeLogged = false;
     
     // Check if CounterTradeTP parameter has changed
     if(g_lastKnownCounterTradeTP != CounterTradeTP)
@@ -1084,14 +1189,7 @@ void UpdateAllTakeProfiles()
         g_lastKnownCounterTradeTP = CounterTradeTP;
         g_lastUpdateFailed = false;
         g_posModifyErrorLogged = false;
-        LogAction("TP Parameter Changed", StringFormat("New CounterTradeTP: %d", CounterTradeTP));
-    }
-    
-    // Reset error flags if TP has changed
-    if(lastKnownTP != PositionGetDouble(POSITION_TP))
-    {
-        g_lastUpdateFailed = false;
-        g_posModifyErrorLogged = false;
+        parameterChangeLogged = false;
     }
     
     // Get the point value and digits for proper TP calculation
@@ -1104,7 +1202,8 @@ void UpdateAllTakeProfiles()
     
     if(g_inPhase1)
     {
-        // Phase 1 logic - respect manual TP changes
+        bool anyUpdates = false;
+        // Phase 1 logic - update TPs when CounterTradeTP changes
         for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
             ulong ticket = PositionGetTicket(i);
@@ -1114,15 +1213,16 @@ void UpdateAllTakeProfiles()
                 ENUM_ORDER_TYPE posType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
                 double currentTP = PositionGetDouble(POSITION_TP);
                 
-                // Only update TP if CounterTradeTP parameter changed
-                if(g_lastKnownCounterTradeTP != CounterTradeTP)
+                // Calculate new TP based on current CounterTradeTP
+                double newTP = (posType == ORDER_TYPE_BUY) 
+                              ? openPrice + (CounterTradeTP * point * points_multiplier)
+                              : openPrice - (CounterTradeTP * point * points_multiplier);
+                              
+                newTP = NormalizeDouble(newTP, digits);
+                
+                // Only update if TP is different
+                if(MathAbs(currentTP - newTP) > point)
                 {
-                    double newTP = (posType == ORDER_TYPE_BUY) 
-                                  ? openPrice + (CounterTradeTP * point * points_multiplier)
-                                  : openPrice - (CounterTradeTP * point * points_multiplier);
-                                  
-                    newTP = NormalizeDouble(newTP, digits);
-                    
                     MqlTradeRequest request = {};
                     MqlTradeResult result = {};
                     
@@ -1134,9 +1234,9 @@ void UpdateAllTakeProfiles()
                     bool success = OrderSend(request, result);
                     if(success && result.retcode == TRADE_RETCODE_DONE)
                     {
-                        LogAction("TP Updated", StringFormat("Phase 1 - Ticket: %d, PositionID: %d, Type: %s, New TP: %.5f", 
-                                 ticket, PositionGetInteger(POSITION_IDENTIFIER), 
-                                 posType == ORDER_TYPE_BUY ? "BUY" : "SELL", newTP));
+                        anyUpdates = true;
+                        LogAction("TP Updated", StringFormat("Phase 1 - Ticket: %d, Type: %s, New TP: %.5f", 
+                                 ticket, posType == ORDER_TYPE_BUY ? "BUY" : "SELL", newTP));
                     }
                     else if(!g_lastUpdateFailed && !g_posModifyErrorLogged)
                     {
@@ -1159,163 +1259,66 @@ void UpdateAllTakeProfiles()
                 }
             }
         }
-    }
-    else
-    {
-        // Check for mobile TP changes or last trade closure every second
-        if(TimeCurrent() - g_lastTPCheck >= 1)
+        
+        // Log parameter change only if updates were made
+        if(anyUpdates && !parameterChangeLogged)
         {
-            g_lastTPCheck = TimeCurrent();
-            
-            ulong lastTicket = GetLastTradeTicket();
-            double syncTP = 0;
-            bool needSync = false;
-            
-            // First pass: Check if last trade was closed or if any TP was changed
-            for(int i = PositionsTotal() - 1; i >= 0; i--)
-            {
-                ulong ticket = PositionGetTicket(i);
-                if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
-                {
-                    double currentTP = PositionGetDouble(POSITION_TP);
-                    
-                    // If this is the last trade and its TP changed
-                    if(ticket == lastTicket && currentTP != g_lastSyncedTP)
-                    {
-                        syncTP = currentTP;
-                        needSync = true;
-                        LogAction("TP Change Detected", StringFormat("Last Trade TP changed to: %.5f", syncTP));
-                        break;
-                    }
-                }
-            }
-            
-            // If last trade was closed, use its last known TP for sync
-            if(lastTicket == 0 && g_lastSyncedTP != 0)
-            {
-                syncTP = g_lastSyncedTP;
-                needSync = true;
-                LogAction("Last Trade Closed", "Using last known TP for sync");
-            }
-            
-            // Second pass: Sync all trades to the new TP if needed
-            if(needSync)
-            {
-                for(int i = PositionsTotal() - 1; i >= 0; i--)
-                {
-                    ulong ticket = PositionGetTicket(i);
-                    if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
-                    {
-                        double currentTP = PositionGetDouble(POSITION_TP);
-                        if(currentTP != syncTP)
-                        {
-                            MqlTradeRequest request = {};
-                            MqlTradeResult result = {};
-                            
-                            request.action = TRADE_ACTION_SLTP;
-                            request.position = ticket;
-                            request.symbol = _Symbol;
-                            request.tp = syncTP;
-                            
-                            bool success = OrderSend(request, result);
-                            if(success && result.retcode == TRADE_RETCODE_DONE)
-                            {
-                                LogAction("TP Synced", StringFormat("Phase 2 - Ticket: %d synced to TP: %.5f", ticket, syncTP));
-                            }
-                            else if(!g_lastUpdateFailed)
-                            {
-                                LogError("TP Sync", GetLastError());
-                                g_lastUpdateFailed = true;
-                            }
-                        }
-                    }
-                }
-                g_lastSyncedTP = syncTP;
-            }
+            LogAction("TP Parameter Applied", StringFormat("CounterTradeTP updated to: %d", CounterTradeTP));
+            parameterChangeLogged = true;
         }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Monitor and sync last trade TP to previous trades                  |
+//+------------------------------------------------------------------+
+void MonitorLastTradeTP()
+{
+    if(g_inPhase1)
+        return;
         
-        // Continue with normal Phase 2 TP updates
-        ulong lastTicket = GetLastTradeTicket();
-        if(lastTicket == 0)
-            return;
-            
-        if(!PositionSelectByTicket(lastTicket))
-            return;
-            
-        // Calculate new TP for last trade based on its open price
-        double lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        ENUM_ORDER_TYPE lastType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
+    // Get current last trade
+    ulong lastTicket = GetLastTradeTicket();
+    if(lastTicket == 0)
+        return;
         
-        double newLastTP = (lastType == ORDER_TYPE_BUY) 
-                          ? lastOpenPrice + (CounterTradeTP * point * points_multiplier)
-                          : lastOpenPrice - (CounterTradeTP * point * points_multiplier);
-                          
-        newLastTP = NormalizeDouble(newLastTP, digits);
+    // If we can't select the position, return
+    if(!PositionSelectByTicket(lastTicket))
+        return;
         
-        // Only proceed if TP actually changed
-        if(newLastTP != lastKnownTP)
+    double lastTradeTP = PositionGetDouble(POSITION_TP);
+    if(lastTradeTP == 0)
+        return;
+        
+    // Force sync all other trades to match the last trade's TP
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(ticket != lastTicket && 
+           PositionSelectByTicket(ticket) && 
+           PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
         {
-            lastKnownTP = newLastTP;
-            g_lastUpdateFailed = false;  // Reset error state when attempting new TP
+            double currentTP = PositionGetDouble(POSITION_TP);
             
-            // Update last trade's TP first
-            MqlTradeRequest request = {};
-            MqlTradeResult result = {};
-            
-            request.action = TRADE_ACTION_SLTP;
-            request.position = lastTicket;
-            request.symbol = _Symbol;
-            request.tp = newLastTP;
-            
-            bool success = OrderSend(request, result);
-            if(success && result.retcode == TRADE_RETCODE_DONE)
+            // Only update if TP is different
+            if(MathAbs(currentTP - lastTradeTP) > SymbolInfoDouble(_Symbol, SYMBOL_POINT))
             {
-                LogAction("Last Trade TP Updated", StringFormat("Phase 2 - Ticket: %d, Type: %s, New TP: %.5f", 
-                         lastTicket, lastType == ORDER_TYPE_BUY ? "BUY" : "SELL", newLastTP));
-                         
-                // Now sync all other trades to this new TP
-                for(int i = PositionsTotal() - 1; i >= 0; i--)
+                MqlTradeRequest request = {};
+                MqlTradeResult result = {};
+                
+                request.action = TRADE_ACTION_SLTP;
+                request.position = ticket;
+                request.symbol = _Symbol;
+                request.tp = lastTradeTP;
+                
+                bool success = OrderSend(request, result);
+                if(success && result.retcode == TRADE_RETCODE_DONE)
                 {
-                    ulong ticket = PositionGetTicket(i);
-                    if(ticket != lastTicket && PositionSelectByTicket(ticket) && 
-                       PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
-                    {
-                        ENUM_ORDER_TYPE posType = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
-                        double currentTP = PositionGetDouble(POSITION_TP);
-                        
-                        if(currentTP != newLastTP)
-                        {
-                            request.position = ticket;
-                            request.tp = newLastTP;
-                            
-                            success = OrderSend(request, result);
-                            if(success && result.retcode == TRADE_RETCODE_DONE)
-                            {
-                                LogAction("TP Synced", StringFormat("Phase 2 - Ticket: %d, Type: %s, New TP: %.5f", 
-                                         ticket, posType == ORDER_TYPE_BUY ? "BUY" : "SELL", newLastTP));
-                            }
-                        }
-                    }
-                }
-            }
-            else if(!g_lastUpdateFailed && !g_posModifyErrorLogged)
-            {
-                if(result.retcode == 10025)  // No changes
-                {
-                    g_lastUpdateFailed = true;
-                }
-                else if(GetLastError() == 4756)  // Position modification disabled
-                {
-                    g_posModifyErrorLogged = true;
-                    LogError("UpdateTP", 4756);
+                    LogAction("TP Synced", StringFormat("Trade %d synced to TP: %.5f", ticket, lastTradeTP));
                 }
                 else
                 {
-                    LogError("UpdateTP", GetLastError());
-                    if(result.retcode != TRADE_RETCODE_DONE)
-                        LogAction("Last Trade TP Update Failed", StringFormat("RetCode: %d, Comment: %s", 
-                                result.retcode, result.comment));
-                    g_lastUpdateFailed = true;
+                    LogError("TP Sync", GetLastError());
                 }
             }
         }
@@ -1625,4 +1628,178 @@ void CheckTotalLosses()
         // Stop the EA
         ExpertRemove();
     }
+}
+
+//+------------------------------------------------------------------+
+//| Force TP synchronization in Phase 2                                |
+//+------------------------------------------------------------------+
+void ForceTPSync()
+{
+    //Print("\n=== ForceTPSync Start ===");
+    //Print("g_inPhase1: ", g_inPhase1);
+    
+    // Only proceed if we have trades in Phase 2
+    int totalTrades = CountEATrades();
+    //Print("Total EA trades: ", totalTrades);
+    
+    if(totalTrades == 0)
+    {
+    //    Print("No trades to sync");
+    //    Print("=== ForceTPSync End ===\n");
+        return;
+    }
+    
+    // Get current last trade
+    ulong lastTicket = GetLastTradeTicket();
+    //Print("Last trade ticket: ", lastTicket);
+    
+    double syncTP = 0;
+    
+    // If we can find the last trade, get its TP
+    if(lastTicket != 0 && PositionSelectByTicket(lastTicket))
+    {
+        double lastTradeTP = PositionGetDouble(POSITION_TP);
+        string lastTradeComment = PositionGetString(POSITION_COMMENT);
+        ENUM_POSITION_TYPE lastTradeType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        
+       // Print("Last trade details - Ticket: ", lastTicket, 
+       //       ", Type: ", (lastTradeType == POSITION_TYPE_BUY ? "BUY" : "SELL"),
+       //       ", TP: ", lastTradeTP,
+       //       ", Comment: ", lastTradeComment);
+        
+        // Always recalculate TP for the last trade based on its open price
+        double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+        int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+        double points_multiplier = (digits == 3 || digits == 5) ? 10 : 1;
+        
+        double newTP = (lastTradeType == POSITION_TYPE_BUY) 
+                      ? lastOpenPrice + (CounterTradeTP * point * points_multiplier)
+                      : lastOpenPrice - (CounterTradeTP * point * points_multiplier);
+                      
+        newTP = NormalizeDouble(newTP, digits);
+        
+        // Update last trade's TP if it's different
+        if(MathAbs(lastTradeTP - newTP) > point)
+        {
+            MqlTradeRequest request = {};
+            MqlTradeResult result = {};
+            
+            request.action = TRADE_ACTION_SLTP;
+            request.position = lastTicket;
+            request.symbol = _Symbol;
+            request.tp = newTP;
+            request.magic = g_magicNumber;
+            
+            Print("Updating last trade TP to: ", newTP);
+            bool success = OrderSend(request, result);
+            
+            if(success && result.retcode == TRADE_RETCODE_DONE)
+            {
+                Print("Successfully updated last trade TP");
+                syncTP = newTP;
+            }
+            else
+            {
+                Print("Failed to update last trade TP. Error: ", GetLastError());
+                return;  // Don't proceed if we can't update the last trade
+            }
+        }
+        else
+        {
+            syncTP = lastTradeTP;  // Use current TP if no update needed
+        }
+    }
+    else
+    {
+        Print("Could not find last trade - sync aborted");
+        Print("=== ForceTPSync End ===\n");
+        return;
+    }
+    
+    // Now sync all other trades to match the target TP
+    int updatedTrades = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(ticket != lastTicket && 
+           PositionSelectByTicket(ticket) && 
+           PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            double currentTP = PositionGetDouble(POSITION_TP);
+            
+            // Only update if TP is different
+            if(MathAbs(currentTP - syncTP) > SymbolInfoDouble(_Symbol, SYMBOL_POINT))
+            {
+                MqlTradeRequest request = {};
+                MqlTradeResult result = {};
+                
+                request.action = TRADE_ACTION_SLTP;
+                request.position = ticket;
+                request.symbol = _Symbol;
+                request.tp = syncTP;
+                request.magic = g_magicNumber;
+                
+                Print("Syncing trade ", ticket, " TP to: ", syncTP);
+                bool success = OrderSend(request, result);
+                
+                if(success && result.retcode == TRADE_RETCODE_DONE)
+                {
+                    updatedTrades++;
+                    Print("Successfully synced trade ", ticket);
+                }
+                else
+                {
+                    Print("Failed to sync trade ", ticket, ". Error: ", GetLastError());
+                }
+            }
+        }
+    }
+    
+    if(updatedTrades > 0)
+    {
+        Print("Synced ", updatedTrades, " trades to TP: ", syncTP);
+    }
+    else
+    {
+   //   Print("No trades needed TP sync");
+    }
+    
+   // Print("=== ForceTPSync End ===\n");
+}
+
+// Add new function for phase detection
+bool IsInPhase1()
+{
+    int buyCount = 0;
+    int sellCount = 0;
+    bool hasNonStartingVolume = false;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double volume = PositionGetDouble(POSITION_VOLUME);
+            string comment = PositionGetString(POSITION_COMMENT);
+            
+            // Check if this is a Phase 1 trade
+            bool isPhase1Trade = (StringFind(comment, "Phase1") >= 0);
+            
+            if(type == POSITION_TYPE_BUY && isPhase1Trade)
+                buyCount++;
+            else if(type == POSITION_TYPE_SELL && isPhase1Trade)
+                sellCount++;
+                
+            // Check if volume matches starting volume
+            if(MathAbs(volume - StartingVolume) > 0.001)  // Using small epsilon for float comparison
+                hasNonStartingVolume = true;
+        }
+    }
+    
+    // We're in Phase 1 if:
+    // 1. We have exactly one buy and one sell trade
+    // 2. All trades have starting volume
+    return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
 } 
