@@ -736,7 +736,8 @@ void PrintScalingSequence()
     for(int i=1; i<=10; i++)
     {
         Print("Trade ", i, ": ", volume, " lots");
-        volume = NormalizeDouble(volume + (volume * ScalePercent / 100), 2);
+        // Calculate next volume using ScalePercent
+        volume = NormalizeDouble(volume * (ScalePercent/100.0), 2);
     }
 }
 
@@ -798,7 +799,7 @@ void OnTick()
                     g_lastTradeVolume = remainingVolume;  // Use the remaining trade's volume for scaling
                     
                     // Calculate new volume with proper scaling
-                    double newVolume = NormalizeDouble(g_lastTradeVolume * (1 + ScalePercent/100.0), 2);
+                    double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
                     
                     LogAction("Phase Change", StringFormat("Trade closed in Phase 1, switching to Phase 2. Current Volume: %.2f, Next Scale: %.2f", 
                              g_lastTradeVolume, newVolume));
@@ -1005,7 +1006,9 @@ void ManagePhase2()
     if(ShouldScaleIn(lastTicket))
     {
         LogAction("Scaling In", StringFormat("Base Ticket: %d", lastTicket));
-        double newVolume = NormalizeDouble(g_lastTradeVolume + (g_lastTradeVolume * ScalePercent / 100), 2);
+        
+        // Calculate new volume with proper scaling percentage
+        double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
         
         // Validate volume before trying to open trade
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1494,7 +1497,7 @@ bool ShouldScaleIn(ulong ticket)
     // Initialize last scale price if it's zero
     if(g_lastScalePrice == 0)
     {
-        g_lastScalePrice = openPrice;
+        g_lastScalePrice = currentPrice;  // Use current price instead of open price
         LogAction("Scale Price Initialized", StringFormat("Type: %s, Price: %.5f", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice));
         return false;  // Don't scale immediately after initialization
@@ -1533,16 +1536,29 @@ bool ShouldScaleIn(ulong ticket)
         LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance));
                  
-        // Calculate new volume with proper scaling
-        double newVolume = NormalizeDouble(g_lastTradeVolume * (1 + ScalePercent/100.0), 2);
+        // Calculate new volume with proper scaling percentage
+        double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
         
-        // Update last scale price ONLY if we're actually going to scale
-        g_lastScalePrice = currentPrice;
+        // Validate volume against broker limits
+        double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+        double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+        double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+        
+        if(newVolume < minVolume || newVolume > maxVolume)
+        {
+            LogAction("Volume Error", StringFormat("Volume %.2f outside allowed range [%.2f-%.2f]", 
+                     newVolume, minVolume, maxVolume));
+            return false;
+        }
+        
+        // Round to the nearest valid step size
+        newVolume = NormalizeDouble(MathRound(newVolume / stepVolume) * stepVolume, 2);
         
         // Open new trade with scaled volume
         if(OpenTrade(type, newVolume, "Scale_In"))
         {
             g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
+            g_lastScalePrice = currentPrice;  // Update last scale price ONLY after successful trade
             return true;
         }
     }
