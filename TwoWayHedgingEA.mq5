@@ -15,6 +15,8 @@ CRITICAL TECHNICAL DETAILS:
    * Each trade calculates its own TP: OpenPrice ± (CounterTradeTP * point_value)
    * TPs are not linked between trades
    * Updates affect individual trades only
+   * Manual TP changes are respected
+   * TP updates only occur when CounterTradeTP parameter changes
    
    Phase 2 - Synchronized TPs:
    * When settings change:
@@ -23,9 +25,35 @@ CRITICAL TECHNICAL DETAILS:
    * When last trade closes:
      - Its final TP becomes the sync target
      - All remaining trades update to match
-   * Manual TP changes are blocked
+   * Manual TP changes from mobile are detected and propagated
+   * Mobile TP changes on last trade become the new sync target
 
-2. Phase Transition Logic:
+2. Mobile Interaction Handling:
+   Phase 1 Mobile Features:
+   * Manual TP modifications are preserved
+   * TPs only update when CounterTradeTP parameter changes
+   * Individual trade TPs can be set independently
+   * Changes persist until parameter update
+
+   Phase 2 Mobile Features:
+   * Last trade's TP changes are detected
+   * Changes propagate to all other trades
+   * Sync maintains even after mobile modifications
+   * Last known TP preserved when last trade closes
+
+3. TP Change Detection:
+   * Continuous monitoring of TP values
+   * Detection of mobile platform changes
+   * Preservation of manual adjustments
+   * Proper synchronization after changes
+
+4. Trade Closure Handling:
+   * Manual closure detection
+   * Proper volume tracking maintenance
+   * Phase reset on manual closure
+   * Last known TP preservation
+
+5. Phase Transition Logic:
    Phase 1 → 2 (After TP Hit):
    * Identifies remaining trade direction
    * Sets scaling direction to match
@@ -38,13 +66,13 @@ CRITICAL TECHNICAL DETAILS:
    * Clears TP sync state
    * Maintains volume tracking
 
-3. Volume Management:
+6. Volume Management:
    * Progression tracking via g_lastTradeVolume
    * Normalization: Round to symbol step size
    * Validation against broker limits
    * Scaling sequence preservation
 
-4. Risk Management:
+7. Risk Management:
    * Total Loss Monitoring:
      - Continuously tracks floating losses in Phase 2
      - Compares against TotalLosses parameter
