@@ -636,8 +636,36 @@ void OnTick()
         
     // Check hold time after profit
     if(TimeCurrent() - g_lastProfitTime < TradeHoldTime)
+    {
+        static bool holdTimeWarningLogged = false;
+        if(!holdTimeWarningLogged)
+        {
+            LogAction("Hold Time Active", StringFormat("Waiting for %d seconds after last profit", TradeHoldTime));
+            holdTimeWarningLogged = true;
+        }
         return;
-        
+    }
+    
+    // Reset the hold time warning flag
+    static bool holdTimeWarningLogged = false;
+    holdTimeWarningLogged = false;
+    
+    // Check for manual trade closure
+    static int lastTradeCount = 0;
+    int currentTradeCount = CountEATrades();
+    
+    if(currentTradeCount < lastTradeCount)
+    {
+        // Trade was closed (manually or by TP)
+        g_lastProfitTime = TimeCurrent();
+        g_inPhase1 = true;
+        g_lastScalePrice = 0;
+        LogAction("Trade Count Changed", "Resetting to Phase 1 and applying hold time");
+        lastTradeCount = currentTradeCount;
+        return;
+    }
+    lastTradeCount = currentTradeCount;
+    
     // Update TPs for existing trades if needed
     UpdateAllTakeProfiles();
     
@@ -1290,48 +1318,36 @@ bool ShouldScaleIn(ulong ticket)
         return false;  // Don't scale immediately after initialization
     }
 
-    // Calculate the required price movement
-    double requiredMove = FixedDistance * _Point;
-    
-    // Calculate actual price movement from last scale price
-    double actualMove = (type == ORDER_TYPE_BUY) 
-                       ? MathAbs(g_lastScalePrice - currentPrice)  // For BUY, we want absolute movement
-                       : MathAbs(currentPrice - g_lastScalePrice); // For SELL, we want absolute movement
-    
-    // Log price movement for debugging
-    static datetime lastLogTime = 0;
-    if(TimeCurrent() - lastLogTime >= 60)  // Log once per minute
+    // Calculate price movement in points (1 point = 0.00001 for 5 digit broker)
+    double priceMove = 0;
+    if(type == ORDER_TYPE_BUY)
     {
-        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %.5f, Actual: %.5f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, requiredMove, actualMove));
+        // For BUY, we want price to move DOWN from last scale price
+        priceMove = NormalizeDouble((g_lastScalePrice - currentPrice) * 100000, 0);  // Convert to points
+    }
+    else
+    {
+        // For SELL, we want price to move UP from last scale price
+        priceMove = NormalizeDouble((currentPrice - g_lastScalePrice) * 100000, 0);  // Convert to points
+    }
+    
+    // Log price movement for debugging (only once per minute to avoid log spam)
+    static datetime lastLogTime = 0;
+    if(TimeCurrent() - lastLogTime >= 60)
+    {
+        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.0f points", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, FixedDistance, priceMove));
         lastLogTime = TimeCurrent();
     }
     
-    // Check if price has moved enough from the last scale price
-    if(actualMove >= requiredMove)
+    // Check if price has moved enough points in the correct direction
+    if(priceMove >= FixedDistance)
     {
-        // Add a small delay to prevent rapid scaling
-        static datetime lastScaleTime = 0;
-        datetime currentTime = TimeCurrent();
-        
-        // Ensure at least 5 seconds between scales
-        if(currentTime - lastScaleTime < 5)
-            return false;
-            
-        // For BUY trades, only scale if price moved down
-        if(type == ORDER_TYPE_BUY && currentPrice >= g_lastScalePrice)
-            return false;
-            
-        // For SELL trades, only scale if price moved up
-        if(type == ORDER_TYPE_SELL && currentPrice <= g_lastScalePrice)
-            return false;
-            
-        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.5f, Required: %.5f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", actualMove, requiredMove));
+        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.0f points, Required: %d points", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance));
                  
-        // Update last scale price and time ONLY if we're actually going to scale
+        // Update last scale price ONLY if we're actually going to scale
         g_lastScalePrice = currentPrice;
-        lastScaleTime = currentTime;
         return true;
     }
     
