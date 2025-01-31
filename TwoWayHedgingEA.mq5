@@ -387,6 +387,7 @@ static bool g_noMoneyErrorLogged = false;      // For no money errors
 static bool g_posModifyErrorLogged = false;    // For position modification errors
 static datetime g_lastErrorLogTime = 0;        // To control error log frequency
 static double g_lastScalePrice = 0;  // Track the price of last scale in
+static int g_lastKnownCounterTradeTP = 0;  // Track last known TP setting
 
 //+------------------------------------------------------------------+
 //| Logging Functions                                                  |
@@ -1030,6 +1031,15 @@ void UpdateAllTakeProfiles()
 {
     static double lastKnownTP = 0;
     
+    // Check if CounterTradeTP parameter has changed
+    if(g_lastKnownCounterTradeTP != CounterTradeTP)
+    {
+        g_lastKnownCounterTradeTP = CounterTradeTP;
+        g_lastUpdateFailed = false;  // Reset error flags when TP parameter changes
+        g_posModifyErrorLogged = false;
+        LogAction("TP Parameter Changed", StringFormat("New CounterTradeTP: %d", CounterTradeTP));
+    }
+    
     // Reset error flags if TP has changed
     if(lastKnownTP != PositionGetDouble(POSITION_TP))
     {
@@ -1048,7 +1058,7 @@ void UpdateAllTakeProfiles()
     
     if(g_inPhase1)
     {
-        // Phase 1 logic remains the same - update TPs independently
+        // Phase 1 logic - update TPs independently and force update if CounterTradeTP changed
         for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
             ulong ticket = PositionGetTicket(i);
@@ -1064,7 +1074,8 @@ void UpdateAllTakeProfiles()
                 newTP = NormalizeDouble(newTP, digits);
                 
                 double currentTP = PositionGetDouble(POSITION_TP);
-                if(currentTP != newTP)  // Only update if TP actually changed
+                // Update if TP is different or if CounterTradeTP parameter changed
+                if(currentTP != newTP || g_lastKnownCounterTradeTP == CounterTradeTP)
                 {
                     MqlTradeRequest request = {};
                     MqlTradeResult result = {};
@@ -1455,31 +1466,38 @@ void CheckTotalLosses()
         LogAction("Risk Management", alertMessage);
         
         // Show popup alert to user
-        Alert(alertMessage);
-        MessageBox(alertMessage, "Risk Management - EA Stopped", MB_ICONEXCLAMATION);
+        Alert(alertMessage, "Risk Management - EA Stopped", MB_ICONEXCLAMATION);
         
-        // Close all positions with market price
+        // Close all positions at market price
         for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
             ulong ticket = PositionGetTicket(i);
             if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
             {
-                ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
-                double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
-                                                             : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-                
                 MqlTradeRequest request = {};
                 MqlTradeResult result = {};
                 
-                request.action = TRADE_ACTION_SLTP;
+                request.action = TRADE_ACTION_DEAL;
                 request.position = ticket;
                 request.symbol = _Symbol;
-                request.tp = currentPrice;
+                request.volume = PositionGetDouble(POSITION_VOLUME);
+                
+                // Set the order type to close the position
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                {
+                    request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                    request.type = ORDER_TYPE_SELL;
+                }
+                else
+                {
+                    request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                    request.type = ORDER_TYPE_BUY;
+                }
                 
                 bool success = OrderSend(request, result);
                 if(success && result.retcode == TRADE_RETCODE_DONE)
                 {
-                    LogAction("Emergency Position Close", StringFormat("Ticket: %d, New TP: %.5f", ticket, currentPrice));
+                    LogAction("Emergency Position Close", StringFormat("Ticket: %d closed at market price", ticket));
                 }
                 else
                 {
