@@ -1129,6 +1129,9 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double volume, string comment)
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
     
+    // Get allowed filling modes for the symbol
+    int filling = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+    
     request.action = TRADE_ACTION_DEAL;
     request.symbol = _Symbol;
     request.volume = volume;
@@ -1138,6 +1141,20 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double volume, string comment)
     request.deviation = 5;
     request.magic = g_magicNumber;
     request.comment = comment;
+    
+    // Set appropriate filling mode
+    if((filling & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+    {
+        request.type_filling = ORDER_FILLING_FOK;
+    }
+    else if((filling & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+    {
+        request.type_filling = ORDER_FILLING_IOC;
+    }
+    else
+    {
+        request.type_filling = ORDER_FILLING_RETURN;  // Default filling mode
+    }
     
     bool success = OrderSend(request, result);
     
