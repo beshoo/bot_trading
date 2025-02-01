@@ -1529,58 +1529,94 @@ bool IsTradeClosedInProfit(ulong ticket)
 }
 
 /*
-* ShouldScaleIn
-* Purpose: Determine if conditions met for scaling
+* CalculatePointsMovement
+* Purpose: Calculate price movement in points for any symbol
 * Parameters:
-*   ticket (ulong) - Base trade ticket
-* Returns: bool - true if should scale in
-* Behavior:
-*   - Checks price movement against FixedDistance
-*   - Considers trade direction
-* Usage: Called in Phase 2 for scaling decisions
+*   priceFrom (double) - Starting price
+*   priceTo (double) - Ending price
+* Returns: double - Price movement in points
 */
+double CalculatePointsMovement(double priceFrom, double priceTo)
+{
+    // Get symbol properties
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    
+    // Calculate raw price difference
+    double priceDiff = MathAbs(priceTo - priceFrom);
+    
+    // Convert price difference to points based on symbol
+    double points;
+    
+    if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+    {
+        // For Gold: 1 point = $0.1
+        // So 2801.35 - 2801.25 = 0.10 = 1 point
+        points = priceDiff / 0.1;
+    }
+    else if(StringFind(_Symbol, "BTC") >= 0)
+    {
+        // For Bitcoin: 1 point = $1
+        points = priceDiff;
+    }
+    else
+    {
+        // For Forex: Convert based on digits
+        points = priceDiff / point;
+    }
+    
+    return NormalizeDouble(points, 1);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate the point difference between two prices                  |
+//+------------------------------------------------------------------+
+double CalculatePointDifference(const string symbol, double price1, double price2)
+{
+   // Retrieve the point value for the given symbol
+   double point = 0.0;
+   if(!SymbolInfoDouble(symbol, SYMBOL_POINT, point))
+   {
+      Print("Error: Unable to retrieve the point value for symbol ", symbol);
+      return(0.0);
+   }
+   
+   // Calculate the difference in points
+   double pointDifference = (price2 - price1) / point;
+   
+   return(pointDifference);
+}
+
+//+------------------------------------------------------------------+
+//| Should Scale In function using the new point calculation          |
+//+------------------------------------------------------------------+
 bool ShouldScaleIn(ulong ticket)
 {
-    // Don't attempt scaling if we've already logged a no money error
     if(g_noMoneyErrorLogged)
         return false;
         
     if(!PositionSelectByTicket(ticket))
         return false;
         
-    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-    // Initialize last scale price if it's zero
     if(g_lastScalePrice == 0)
     {
-        g_lastScalePrice = currentPrice;  // Use current price instead of open price
+        g_lastScalePrice = currentPrice;
         LogAction("Scale Price Initialized", StringFormat("Type: %s, Price: %.5f", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice));
-        return false;  // Don't scale immediately after initialization
+        return false;
     }
 
-    // Get point value and digits
-    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double points_multiplier = (digits == 3 || digits == 5) ? 10.0 : 1.0;
+    // Calculate price movement using the universal function
+    double priceMove = (type == ORDER_TYPE_BUY) 
+                      ? -CalculatePointDifference(_Symbol, currentPrice, g_lastScalePrice)  // Negative for buy as we want downward movement
+                      : CalculatePointDifference(_Symbol, g_lastScalePrice, currentPrice);  // Positive for sell as we want upward movement
     
-    // Calculate price movement in points
-    double priceMove = 0;
-    if(type == ORDER_TYPE_BUY)
-    {
-        // For BUY, we want price to move DOWN from last scale price
-        priceMove = NormalizeDouble((g_lastScalePrice - currentPrice) / (point * points_multiplier), 1);
-    }
-    else
-    {
-        // For SELL, we want price to move UP from last scale price
-        priceMove = NormalizeDouble((currentPrice - g_lastScalePrice) / (point * points_multiplier), 1);
-    }
-    
-    // Log price movement for debugging (only once per minute to avoid log spam)
+    // Log price movement for debugging (only once per minute)
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
