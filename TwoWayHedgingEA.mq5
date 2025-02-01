@@ -228,7 +228,7 @@ DETAILED FUNCTIONALITY:
    * Rounded to symbol's volume step size
 
    Scaling Calculation:
-   * Uses geometric progression: NewVolume = LastVolume * (1 + ScalePercent/100)
+   * Uses geometric progression: NewVolume = LastVolume * ((100 + ScalePercent)/100)
    * Volume validation process:
      - Checks against SYMBOL_VOLUME_MIN
      - Checks against SYMBOL_VOLUME_MAX
@@ -397,7 +397,7 @@ This EA requires continuous monitoring of:
 input double StartingVolume = 0.01;       // Initial lot size
 input int    CounterTradeTP = 30;         // Take profit in points
 input int    FixedDistance = 30;          // Distance for scaling in points
-input int    ScalePercent = 100;          // Scaling percentage
+input int    ScalePercent = 50;          // Scaling percentage (50 means increase by 50%)
 input int    TradeHoldTime = 60;          // Hold time after profit (seconds)
 input string DailySchedule = "09:00-17:00"; // Trading hours (format: "HH:MM-HH:MM")
 input bool   EnableDailySchedule = false;   // Enable/Disable daily schedule
@@ -761,7 +761,7 @@ void PrintScalingSequence()
     {
         Print("Trade ", i, ": ", volume, " lots");
         // Calculate next volume using ScalePercent
-        volume = NormalizeDouble(volume * (ScalePercent/100.0), 2);
+        volume = NormalizeDouble(volume * ((100 + ScalePercent)/100.0), 2);
     }
 }
 
@@ -826,7 +826,7 @@ void OnTick()
                     g_lastTradeVolume = remainingVolume;  // Use the remaining trade's volume for scaling
                     
                     // Calculate new volume with proper scaling
-                    double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
+                    double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent)/100.0), 2);
                     
                     LogAction("Phase Change", StringFormat("Trade closed in Phase 1, switching to Phase 2. Current Volume: %.2f, Next Scale: %.2f", 
                              g_lastTradeVolume, newVolume));
@@ -1059,7 +1059,7 @@ void ManagePhase2()
         LogAction("Scaling In", StringFormat("Base Ticket: %d", lastTicket));
         
         // Calculate new volume with proper scaling percentage
-        double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
+        double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent)/100.0), 2);
         
         // Validate volume before trying to open trade
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1528,64 +1528,54 @@ bool IsTradeClosedInProfit(ulong ticket)
     return false;
 }
 
-/*
-* CalculatePointsMovement
-* Purpose: Calculate price movement in points for any symbol
-* Parameters:
-*   priceFrom (double) - Starting price
-*   priceTo (double) - Ending price
-* Returns: double - Price movement in points
-*/
-double CalculatePointsMovement(double priceFrom, double priceTo)
-{
-    // Get symbol properties
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    
-    // Calculate raw price difference
-    double priceDiff = MathAbs(priceTo - priceFrom);
-    
-    // Convert price difference to points based on symbol
-    double points;
-    
-    if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-    {
-        // For Gold: 1 point = $0.1
-        // So 2801.35 - 2801.25 = 0.10 = 1 point
-        points = priceDiff / 0.1;
-    }
-    else if(StringFind(_Symbol, "BTC") >= 0)
-    {
-        // For Bitcoin: 1 point = $1
-        points = priceDiff;
-    }
-    else
-    {
-        // For Forex: Convert based on digits
-        points = priceDiff / point;
-    }
-    
-    return NormalizeDouble(points, 1);
-}
-
 //+------------------------------------------------------------------+
-//| Calculate the point difference between two prices                  |
+//| Calculate point difference between two prices for any symbol       |
 //+------------------------------------------------------------------+
 double CalculatePointDifference(const string symbol, double price1, double price2)
 {
-   // Retrieve the point value for the given symbol
    double point = 0.0;
-   if(!SymbolInfoDouble(symbol, SYMBOL_POINT, point))
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   
+   // Special handling for crypto and gold
+   if(digits == 2)
    {
-      Print("Error: Unable to retrieve the point value for symbol ", symbol);
-      return(0.0);
+      if(StringFind(symbol, "BTC") >= 0)
+      {
+         // For BTC, treat $1.00 as 1 point
+         return (price2 - price1);  // Direct price difference
+      }
+      else if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0)
+      {
+         // For Gold, treat $0.10 as 1 point
+         return (price2 - price1) * 10;  // Multiply by 10 since 0.10 = 1 point
+      }
    }
    
-   // Calculate the difference in points
-   double pointDifference = (price2 - price1) / point;
+   // Get point value for forex pairs
+   if(!SymbolInfoDouble(symbol, SYMBOL_POINT, point) || point == 0.0)
+   {
+      Print("Error: Unable to determine the point value for symbol ", symbol);
+      return 0.0;
+   }
    
-   return(pointDifference);
+   // Calculate points based on forex pair type
+   double points = (price2 - price1) / point;
+   
+   // Adjust for JPY pairs (3 digits)
+   if(digits == 3 && StringFind(symbol, "JPY") >= 0)
+   {
+      // For JPY pairs, 1 pip = 0.01, so multiply by 0.1
+      return points * 0.1;
+   }
+   
+   // For standard forex pairs (4 or 5 digits)
+   if(digits == 5)
+   {
+      // For 5-digit brokers, divide by 10 to get standard points
+      return points * 0.1;
+   }
+   
+   return points;
 }
 
 //+------------------------------------------------------------------+
@@ -1603,37 +1593,32 @@ bool ShouldScaleIn(ulong ticket)
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-    if(g_lastScalePrice == 0)
-    {
-        g_lastScalePrice = currentPrice;
-        LogAction("Scale Price Initialized", StringFormat("Type: %s, Price: %.5f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice));
-        return false;
-    }
-
-    // Calculate price movement using the universal function
+    // Get the last trade's open price instead of using g_lastScalePrice
+    double lastTradePrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    
+    // Calculate price movement from last trade to current price
     double priceMove = (type == ORDER_TYPE_BUY) 
-                      ? -CalculatePointDifference(_Symbol, currentPrice, g_lastScalePrice)  // Negative for buy as we want downward movement
-                      : CalculatePointDifference(_Symbol, g_lastScalePrice, currentPrice);  // Positive for sell as we want upward movement
+                      ? -CalculatePointDifference(_Symbol, currentPrice, lastTradePrice)  // Negative for buy as we want downward movement
+                      : CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);  // Positive for sell as we want upward movement
     
     // Log price movement for debugging (only once per minute)
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
-        LogAction("Price Movement Check", StringFormat("Type: %s, Last Scale: %.5f, Current: %.5f, Required: %d points, Move: %.1f points, LastVolume: %.2f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", g_lastScalePrice, currentPrice, FixedDistance, priceMove, g_lastTradeVolume));
+        LogAction("Price Movement Check", StringFormat("Type: %s, Last Trade Price: %.5f, Current: %.5f, Required: %d points, Move: %.1f points, LastVolume: %.2f", 
+                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", lastTradePrice, currentPrice, FixedDistance, priceMove, g_lastTradeVolume));
         lastLogTime = TimeCurrent();
     }
     
-    // Check if price has moved enough points in the correct direction
+    // Only scale if price has moved enough points from the last trade
     if(priceMove >= FixedDistance)
     {
         LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points, LastVolume: %.2f", 
                  type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance, g_lastTradeVolume));
                  
         // Calculate new volume with proper scaling percentage
-        // Correct formula: current volume * (ScalePercent/100.0)
-        double newVolume = NormalizeDouble(g_lastTradeVolume * (ScalePercent/100.0), 2);
+        // Correct formula: current volume * ((100 + ScalePercent)/100.0)
+        double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent)/100.0), 2);
         
         LogAction("Volume Calculation", StringFormat("LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
                  g_lastTradeVolume, ScalePercent, newVolume));
