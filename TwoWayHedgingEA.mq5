@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
 //|                     TwoWayHedgingEA - Technical Documentation        |
 //+------------------------------------------------------------------+
+#include <Trade/Trade.mqh>
 /*
 OVERVIEW:
 This Expert Advisor implements a sophisticated two-phase hedging strategy with dynamic 
@@ -395,8 +396,7 @@ This EA requires continuous monitoring of:
 
 // Input Parameters
 input double StartingVolume = 0.01;       // Initial lot size
-input string __note1__ = "Target has to be greater than distance" readonly;  // Disabled note
-
+input group           "Target has to be greater than distance";
 
 input int    CounterTradeTP = 5;         // Take profit in points
 input int    FixedDistance = 3;          // Distance for scaling in points
@@ -1777,49 +1777,10 @@ void CheckTotalLosses()
     {
         string alertMessage = StringFormat("WARNING: Total losses (%.2f) exceeded maximum allowed (%.2f).\nEA will be stopped for protection!", totalLoss, TotalLosses);
         
-        // Log the event
         LogAction("Risk Management", alertMessage);
-        
-        // Show popup alert to user
         Alert(alertMessage, "Risk Management - EA Stopped", MB_ICONEXCLAMATION);
         
-        // Close all positions at market price
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            ulong ticket = PositionGetTicket(i);
-            if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
-            {
-                MqlTradeRequest request = {};
-                MqlTradeResult result = {};
-                
-                request.action = TRADE_ACTION_DEAL;
-                request.position = ticket;
-                request.symbol = _Symbol;
-                request.volume = PositionGetDouble(POSITION_VOLUME);
-                
-                // Set the order type to close the position
-                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
-                {
-                    request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                    request.type = ORDER_TYPE_SELL;
-                }
-                else
-                {
-                    request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-                    request.type = ORDER_TYPE_BUY;
-                }
-                
-                bool success = OrderSend(request, result);
-                if(success && result.retcode == TRADE_RETCODE_DONE)
-                {
-                    LogAction("Emergency Position Close", StringFormat("Ticket: %d closed at market price", ticket));
-                }
-                else
-                {
-                    LogError("Emergency Position Close", GetLastError());
-                }
-            }
-        }
+        CloseAllTrades();  // Use the new faster method
         
         // Stop the EA
         ExpertRemove();
@@ -1999,3 +1960,51 @@ bool IsInPhase1()
     // 2. All trades have starting volume
     return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
 } 
+
+// Add this function to the file
+void CloseAllTrades()
+{
+    CTrade trade;
+    trade.SetExpertMagicNumber(g_magicNumber);
+    
+    // First pass: Set all TPs to current market price
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double marketPrice = (type == POSITION_TYPE_BUY) ? 
+                               SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                               SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            
+            trade.PositionModify(ticket, 0, marketPrice); // Set SL=0 and TP=market price
+        }
+    }
+    
+    // Small delay to allow TP modifications to process
+    Sleep(50);
+    
+    // Second pass: Close any remaining positions
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            if(trade.PositionClose(ticket))
+            {
+                LogAction("Position Closed", StringFormat("Ticket: %d closed successfully", ticket));
+            }
+            else 
+            {
+                LogError("Position Close", GetLastError());
+            }
+        }
+    }
+    
+    // Reset relevant global variables
+    g_inPhase1 = true;
+    g_lastScalePrice = 0;
+    g_lastTradeVolume = StartingVolume;
+    g_lastProfitTime = TimeCurrent();
+}
