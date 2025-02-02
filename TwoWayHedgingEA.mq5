@@ -395,9 +395,12 @@ This EA requires continuous monitoring of:
 
 // Input Parameters
 input double StartingVolume = 0.01;       // Initial lot size
-input int    CounterTradeTP = 30;         // Take profit in points
-input int    FixedDistance = 30;          // Distance for scaling in points
-input int    ScalePercent = 50;          // Scaling percentage (50 means increase by 50%)
+input string __note1__ = "Target has to be greater than distance" readonly;  // Disabled note
+
+
+input int    CounterTradeTP = 5;         // Take profit in points
+input int    FixedDistance = 3;          // Distance for scaling in points
+input int    ScalePercent = 100;          // Scaling percentage (50 means increase by 50%)
 input int    TradeHoldTime = 60;          // Hold time after profit (seconds)
 input string DailySchedule = "09:00-17:00"; // Trading hours (format: "HH:MM-HH:MM")
 input bool   EnableDailySchedule = false;   // Enable/Disable daily schedule
@@ -1168,21 +1171,14 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double volume, string comment)
     
     double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) 
                                            : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                                           
-    // Get the point value and digits for proper TP calculation
-    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double points_multiplier = 1;
     
-    // Adjust points multiplier based on digits
-    if(digits == 3 || digits == 5)
-        points_multiplier = 10;
-        
-    double tp = (type == ORDER_TYPE_BUY) ? price + (CounterTradeTP * point * points_multiplier)
-                                        : price - (CounterTradeTP * point * points_multiplier);
-                                        
+    // Calculate TP correctly based on trade type
+    double tp = (type == ORDER_TYPE_BUY) 
+                ? price + (CounterTradeTP * SymbolInfoDouble(_Symbol, SYMBOL_POINT))  // BUY: Entry + TP
+                : price - (CounterTradeTP * SymbolInfoDouble(_Symbol, SYMBOL_POINT)); // SELL: Entry - TP
+    
     // Round TP to the correct number of digits
-    tp = NormalizeDouble(tp, digits);
+    tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
     
     MqlTradeRequest request = {};
     MqlTradeResult result = {};
@@ -1533,49 +1529,56 @@ bool IsTradeClosedInProfit(ulong ticket)
 //+------------------------------------------------------------------+
 double CalculatePointDifference(const string symbol, double price1, double price2)
 {
-   double point = 0.0;
+   // Calculate the raw price difference.
+   double diff = price2 - price1;
+   
+   // Retrieve the number of decimals (digits) and the minimal price increment (point)
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   
-   // Special handling for crypto and gold
-   if(digits == 2)
-   {
-      if(StringFind(symbol, "BTC") >= 0)
-      {
-         // For BTC, treat $1.00 as 1 point
-         return (price2 - price1);  // Direct price difference
-      }
-      else if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0)
-      {
-         // For Gold, treat $0.10 as 1 point
-         return (price2 - price1) * 10;  // Multiply by 10 since 0.10 = 1 point
-      }
-   }
-   
-   // Get point value for forex pairs
-   if(!SymbolInfoDouble(symbol, SYMBOL_POINT, point) || point == 0.0)
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0)
    {
       Print("Error: Unable to determine the point value for symbol ", symbol);
       return 0.0;
    }
    
-   // Calculate points based on forex pair type
-   double points = (price2 - price1) / point;
-   
-   // Adjust for JPY pairs (3 digits)
-   if(digits == 3 && StringFind(symbol, "JPY") >= 0)
+   // Extended crypto list – add or remove coin identifiers as needed.
+   string cryptoList[] = {
+      "BTC", "ETH", "LTC", "XRP", "BCH", "BNB", "DOGE", "USDT", "ADA",
+      "XLM", "TRX", "EOS", "SOL", "DOT", "MATIC", "AVAX", "UNI", "SHIB", "ATOM", "VET", "NEO"
+   };
+   for(int i = 0; i < ArraySize(cryptoList); i++)
    {
-      // For JPY pairs, 1 pip = 0.01, so multiply by 0.1
-      return points * 0.1;
+      if(StringFind(symbol, cryptoList[i]) >= 0)
+      {
+         // For many crypto pairs a $1 move is treated as one "point".
+         // However, if the broker's SYMBOL_POINT is not 1.0, then use a conversion.
+         if(MathAbs(point - 1.0) < 1e-6)
+            return diff;
+         else
+            return diff / point;
+      }
    }
    
-   // For standard forex pairs (4 or 5 digits)
-   if(digits == 5)
+   // Check if the symbol is a precious metal (e.g. gold or silver).
+   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
+      StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
    {
-      // For 5-digit brokers, divide by 10 to get standard points
-      return points * 0.1;
+      // Often metals are quoted with 2 decimals.
+      if(digits == 2)
+         return diff * 10;
+      else
+         return diff / point;
    }
    
-   return points;
+   // For forex pairs:
+   // If the broker uses 5-digit quotes (or 3 digits for JPY pairs), then the effective pip is the 4th digit.
+   if(digits == 5 || (digits == 3 && StringFind(symbol, "JPY") >= 0))
+   {
+      return diff / (point * 10);
+   }
+   
+   // Default case (typically 4-digit quotes).
+   return diff / point;
 }
 
 //+------------------------------------------------------------------+
@@ -1590,6 +1593,7 @@ bool ShouldScaleIn(ulong ticket)
         return false;
         
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
+    ulong positionID = PositionGetInteger(POSITION_IDENTIFIER);
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -1601,27 +1605,45 @@ bool ShouldScaleIn(ulong ticket)
                       ? -CalculatePointDifference(_Symbol, currentPrice, lastTradePrice)  // Negative for buy as we want downward movement
                       : CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);  // Positive for sell as we want upward movement
     
-    // Log price movement for debugging (only once per minute)
+    // Log price movement with position ID
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
-        LogAction("Price Movement Check", StringFormat("Type: %s, Last Trade Price: %.5f, Current: %.5f, Required: %d points, Move: %.1f points, LastVolume: %.2f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", lastTradePrice, currentPrice, FixedDistance, priceMove, g_lastTradeVolume));
+        LogAction("Movement :", StringFormat(
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f | PosID: %d", 
+            g_lastTradeVolume,
+            type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+            priceMove,
+            FixedDistance,
+            lastTradePrice,
+            currentPrice,
+            positionID
+        ));
         lastLogTime = TimeCurrent();
     }
     
-    // Only scale if price has moved enough points from the last trade
-    if(priceMove >= FixedDistance)
+    // Only scale if price has moved enough points AND in the correct direction
+    if(MathAbs(priceMove) >= FixedDistance && 
+       ((type == ORDER_TYPE_BUY && priceMove < 0) ||    // For BUY, only scale on downward movement
+        (type == ORDER_TYPE_SELL && priceMove > 0)))    // For SELL, only scale on upward movement
     {
-        LogAction("Scale Condition Met", StringFormat("Type: %s, Movement: %.1f points, Required: %d points, LastVolume: %.2f", 
-                 type == ORDER_TYPE_BUY ? "BUY" : "SELL", priceMove, FixedDistance, g_lastTradeVolume));
-                 
+        LogAction("Scale Condition Met", StringFormat(
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f | PosID: %d",
+            g_lastTradeVolume,
+            type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+            priceMove,
+            FixedDistance,
+            lastTradePrice,
+            currentPrice,
+            positionID
+        ));
+        
         // Calculate new volume with proper scaling percentage
         // Correct formula: current volume * ((100 + ScalePercent)/100.0)
         double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent)/100.0), 2);
         
-        LogAction("Volume Calculation", StringFormat("LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
-                 g_lastTradeVolume, ScalePercent, newVolume));
+        LogAction("Volume Calculation", StringFormat("PositionID: %d, LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
+                 positionID, g_lastTradeVolume, ScalePercent, newVolume));
         
         // Validate volume against broker limits
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1641,12 +1663,13 @@ bool ShouldScaleIn(ulong ticket)
         // Open new trade with scaled volume
         if(OpenTrade(type, newVolume, "Scale_In"))
         {
-            g_lastTradeVolume = newVolume;  // Update last trade volume after successful scale
-            g_lastScalePrice = currentPrice;  // Update last scale price ONLY after successful trade
-            LogAction("Scale Success", StringFormat("Type: %s, NewVolume: %.2f, LastVolume updated", 
-                     type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
-            Sleep(50);  // Small delay after trade
-            ForceTPSync();  // Force sync immediately after new scale trade
+            ulong newPositionID = PositionGetInteger(POSITION_IDENTIFIER);
+            g_lastTradeVolume = newVolume;
+            g_lastScalePrice = currentPrice;
+            LogAction("Scale Success", StringFormat("PositionID: %d, Type: %s, NewVolume: %.2f, LastVolume updated", 
+                     newPositionID, type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
+            Sleep(50);
+            ForceTPSync();
             return true;
         }
     }
