@@ -1570,30 +1570,76 @@ bool IsTradeClosedInProfit(ulong ticket)
 //+------------------------------------------------------------------+
 //| Calculate point difference between two prices for any symbol       |
 //+------------------------------------------------------------------+
+double CalculatePointDifferenceOld(const string symbol, double price1, double price2)
+{
+   // Calculate the raw price difference
+   double diff = price2 - price1;
+   
+   // Special handling for Gold (XAU) and Silver (XAG)
+   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 || StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
+   {
+       // For Gold, multiply by 100 to get the correct point value
+       return diff * 100.0;
+   }
+   else  // For forex pairs like EURUSD
+   {
+       // Get symbol digits and point
+       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+       
+       // For 5-digit brokers (where EURUSD is like 1.23456)
+       if(digits == 5)  // For 5-digit brokers (where EURUSD is like 1.23456)
+       {
+           Print("5-digit price format: ", DoubleToString(price1, 5), " -> ", DoubleToString(price2, 5));
+           return (diff / point) * 10;  // Multiply by 10 to get standard points
+       }
+       // For 3-digit brokers (where EURUSD is like 1.234)
+       else if(digits == 3)
+           return (diff / point) * 10;  // Multiply by 10 to get standard points
+       else  // For 4-digit brokers (where EURUSD is like 1.2345)
+           return diff / point;
+   }
+}
+
+
 double CalculatePointDifference(const string symbol, double price1, double price2)
 {
    // Calculate the raw price difference.
    double diff = price2 - price1;
    
-   // Retrieve the minimal price increment (point) as reported by the broker.
+   // Check if the symbol is a metal.
+   // You can adjust this list as needed.
+   const string metals[] = {"XAU", "GOLD", "XAG", "SILVER", "XPT", "PLATINUM", "XPD", "PALLADIUM"};
+   for(int i = 0; i < ArraySize(metals); i++)
+   {
+      if(StringFind(symbol, metals[i]) != -1)
+      {
+         // For metals, define pip size as 0.01.
+         double pipSize = 0.01;
+         return diff / pipSize;  // Equivalent to diff * 100
+      }
+   }
+   
+   // For non-metal instruments (Forex pairs):
+   // Get the minimal price increment ("point") and the number of digits.
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   if(point <= 0.0)
-   {
-      Print("Error: Unable to determine the point value for symbol ", symbol);
-      return 0.0;
-   }
+   if(point <= 0)
+      return 0;  // Safeguard against invalid point value
    
-   // For precious metals (Gold, Silver), override the point if needed.
-   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
-      StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
-   {
-      // For example, if you want to treat 0.01 price movement as 1 point:
-      point = 0.01;
-   }
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    
-   // Return the difference in "points"
-   return diff / point;
+   // Determine pip size for Forex pairs.
+   // Many non-JPY pairs are quoted with 5 digits (or JPY pairs with 3 digits)
+   // so one pip is 10 times the minimal price increment.
+   double pipSize = ((digits == 5) || (digits == 3)) ? point * 10 : point;
+   
+   return diff / pipSize;
 }
+
+
+
+
+
 //+------------------------------------------------------------------+
 //| Should Scale In function using the new point calculation         |
 //+------------------------------------------------------------------+
@@ -1618,20 +1664,25 @@ bool ShouldScaleIn(ulong ticket)
     // The function should return the difference as: (currentPrice - lastTradePrice)/point.
     double priceMove = CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);
     
-    // Log movement details every 60 seconds (optional)
-    static datetime lastLogTime = 0;
-    if(TimeCurrent() - lastLogTime >= 60)
+    // For debugging - log the actual point difference
+    static datetime lastDebugLog = 0;
+    if(TimeCurrent() - lastDebugLog >= 30)  // Log every 10 seconds
     {
-        LogAction("Movement :", StringFormat(
-            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
-            g_lastTradeVolume,
-            (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
-            priceMove,
-            FixedDistance,
+        // Get the number of digits for the symbol
+        int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+        
+        // Use the digits in the price format string
+        string priceFormat = StringFormat("%%.%df", digits);
+        
+        LogAction("Point Calculation", StringFormat(
+            "Symbol: %s, LastPrice: " + priceFormat + ", CurrentPrice: " + priceFormat + ", Points: %.1f, Required: %d",
+            _Symbol,
             lastTradePrice,
-            currentPrice
+            currentPrice,
+            MathAbs(priceMove),
+            FixedDistance
         ));
-        lastLogTime = TimeCurrent();
+        lastDebugLog = TimeCurrent();
     }
     
     // Check that the market move is in the desired direction:
