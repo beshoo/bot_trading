@@ -55,13 +55,13 @@ CRITICAL TECHNICAL DETAILS:
    * Last known TP preservation
 
 5. Phase Transition Logic:
-   Phase 1 → 2 (After TP Hit):
+   Phase 1 ? 2 (After TP Hit):
    * Identifies remaining trade direction
    * Sets scaling direction to match
    * Begins TP synchronization
    * Starts volume progression
 
-   Phase 2 → 1 (After Scale TP Hit):
+   Phase 2 ? 1 (After Scale TP Hit):
    * Resets to initial state
    * Prepares for new counter-trades
    * Clears TP sync state
@@ -291,8 +291,8 @@ DETAILED FUNCTIONALITY:
    * g_magicNumber: Trade identification
 
    State Transitions:
-   * Phase 1 → Phase 2: When first TP hit
-   * Phase 2 → Phase 1: When scaling TP hit
+   * Phase 1 ? Phase 2: When first TP hit
+   * Phase 2 ? Phase 1: When scaling TP hit
    * Volume progression maintained across phases
 
 8. Logging System:
@@ -1532,8 +1532,7 @@ double CalculatePointDifference(const string symbol, double price1, double price
    // Calculate the raw price difference.
    double diff = price2 - price1;
    
-   // Retrieve the number of decimals (digits) and the minimal price increment (point)
-   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   // Retrieve the minimal price increment (point) as reported by the broker.
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    if(point <= 0.0)
    {
@@ -1541,143 +1540,127 @@ double CalculatePointDifference(const string symbol, double price1, double price
       return 0.0;
    }
    
-   // Extended crypto list – add or remove coin identifiers as needed.
-   string cryptoList[] = {
-      "BTC", "ETH", "LTC", "XRP", "BCH", "BNB", "DOGE", "USDT", "ADA",
-      "XLM", "TRX", "EOS", "SOL", "DOT", "MATIC", "AVAX", "UNI", "SHIB", "ATOM", "VET", "NEO"
-   };
-   for(int i = 0; i < ArraySize(cryptoList); i++)
-   {
-      if(StringFind(symbol, cryptoList[i]) >= 0)
-      {
-         // For many crypto pairs a $1 move is treated as one "point".
-         // However, if the broker's SYMBOL_POINT is not 1.0, then use a conversion.
-         if(MathAbs(point - 1.0) < 1e-6)
-            return diff;
-         else
-            return diff / point;
-      }
-   }
-   
-   // Check if the symbol is a precious metal (e.g. gold or silver).
+   // For precious metals (Gold, Silver), override the point if needed.
    if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
       StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
    {
-      // Often metals are quoted with 2 decimals.
-      if(digits == 2)
-         return diff * 10;
-      else
-         return diff / point;
+      // For example, if you want to treat 0.01 price movement as 1 point:
+      point = 0.01;
    }
    
-   // For forex pairs:
-   // If the broker uses 5-digit quotes (or 3 digits for JPY pairs), then the effective pip is the 4th digit.
-   if(digits == 5 || (digits == 3 && StringFind(symbol, "JPY") >= 0))
-   {
-      return diff / (point * 10);
-   }
-   
-   // Default case (typically 4-digit quotes).
+   // Return the difference in “points”
    return diff / point;
 }
-
 //+------------------------------------------------------------------+
-//| Should Scale In function using the new point calculation          |
+//| Should Scale In function using the new point calculation         |
 //+------------------------------------------------------------------+
 bool ShouldScaleIn(ulong ticket)
 {
+    // Check if money errors have been logged
     if(g_noMoneyErrorLogged)
         return false;
         
     if(!PositionSelectByTicket(ticket))
         return false;
         
+    // Retrieve the order type and last trade's open price.
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
-    ulong positionID = PositionGetInteger(POSITION_IDENTIFIER);
-    double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) 
-                                                  : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-    // Get the last trade's open price instead of using g_lastScalePrice
     double lastTradePrice = PositionGetDouble(POSITION_PRICE_OPEN);
     
-    // Calculate price movement from last trade to current price
-    double priceMove = (type == ORDER_TYPE_BUY) 
-                      ? -CalculatePointDifference(_Symbol, currentPrice, lastTradePrice)  // Negative for buy as we want downward movement
-                      : CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);  // Positive for sell as we want upward movement
+    // For BUY positions use the Bid, for SELL positions use the Ask.
+    double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                                  : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     
-    // Log price movement with position ID
+    // Calculate the price move in points using our generic function.
+    // The function should return the difference as: (currentPrice - lastTradePrice)/point.
+    double priceMove = CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);
+    
+    // Log movement details every 60 seconds (optional)
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
         LogAction("Movement :", StringFormat(
-            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f | PosID: %d", 
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
             g_lastTradeVolume,
-            type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+            (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
             priceMove,
             FixedDistance,
             lastTradePrice,
-            currentPrice,
-            positionID
+            currentPrice
         ));
         lastLogTime = TimeCurrent();
     }
     
-    // Only scale if price has moved enough points AND in the correct direction
-    if(MathAbs(priceMove) >= FixedDistance && 
-       ((type == ORDER_TYPE_BUY && priceMove < 0) ||    // For BUY, only scale on downward movement
-        (type == ORDER_TYPE_SELL && priceMove > 0)))    // For SELL, only scale on upward movement
+    // Check that the market move is in the desired direction:
+    // For BUY: currentPrice should be lower than lastTradePrice (priceMove negative)
+    // For SELL: currentPrice should be higher than lastTradePrice (priceMove positive)
+    bool directionOk = (type == ORDER_TYPE_BUY && currentPrice < lastTradePrice) ||
+                       (type == ORDER_TYPE_SELL && currentPrice > lastTradePrice);
+    
+    // If the absolute move in points exceeds or equals the FixedDistance and direction is correct, scale in.
+    if(MathAbs(priceMove) >= FixedDistance && directionOk)
     {
+        // Optional logging for scale condition met
         LogAction("Scale Condition Met", StringFormat(
-            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f | PosID: %d",
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
             g_lastTradeVolume,
-            type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+            (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
             priceMove,
             FixedDistance,
             lastTradePrice,
-            currentPrice,
-            positionID
+            currentPrice
         ));
         
-        // Calculate new volume with proper scaling percentage
-        // Correct formula: current volume * ((100 + ScalePercent)/100.0)
-        double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent)/100.0), 2);
+        // Calculate the new volume (doubling in this case using ScalePercent of 100).
+        double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent) / 100.0), 2);
+        LogAction("Volume Calculation", StringFormat(
+            "PositionID: %d, LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
+            PositionGetInteger(POSITION_IDENTIFIER),
+            g_lastTradeVolume,
+            ScalePercent,
+            newVolume
+        ));
         
-        LogAction("Volume Calculation", StringFormat("PositionID: %d, LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
-                 positionID, g_lastTradeVolume, ScalePercent, newVolume));
-        
-        // Validate volume against broker limits
+        // Validate volume against broker limits.
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
         double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
         double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
         
         if(newVolume < minVolume || newVolume > maxVolume)
         {
-            LogAction("Volume Error", StringFormat("Volume %.2f outside allowed range [%.2f-%.2f]", 
-                     newVolume, minVolume, maxVolume));
+            LogAction("Volume Error", StringFormat(
+                "Volume %.2f outside allowed range [%.2f - %.2f]", 
+                newVolume, minVolume, maxVolume
+            ));
             return false;
         }
         
-        // Round to the nearest valid step size
+        // Round to the nearest valid step.
         newVolume = NormalizeDouble(MathRound(newVolume / stepVolume) * stepVolume, 2);
         
-        // Open new trade with scaled volume
+        // Attempt to open the new trade with the calculated volume.
         if(OpenTrade(type, newVolume, "Scale_In"))
         {
-            ulong newPositionID = PositionGetInteger(POSITION_IDENTIFIER);
+            // Update global tracking variables after a successful scale-in.
             g_lastTradeVolume = newVolume;
             g_lastScalePrice = currentPrice;
-            LogAction("Scale Success", StringFormat("PositionID: %d, Type: %s, NewVolume: %.2f, LastVolume updated", 
-                     newPositionID, type == ORDER_TYPE_BUY ? "BUY" : "SELL", newVolume));
+            LogAction("Scale Success", StringFormat(
+                "New trade opened. PositionID: %d | Type: %s | Price: %.2f | NewVolume: %.2f",
+                PositionGetInteger(POSITION_IDENTIFIER),
+                (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+                currentPrice,
+                newVolume
+            ));
             Sleep(50);
             ForceTPSync();
             return true;
         }
     }
     
-    // Add safety check for zero volume
+    // Safety check: Ensure g_lastTradeVolume is not zero.
     if(g_lastTradeVolume == 0)
     {
-        // Only reset to StartingVolume if we have no trades
+        // If no trades exist, reset to the starting volume.
         if(CountEATrades() == 0)
         {
             LogAction("Scale Error", "Last trade volume is zero - no trades exist, using StartingVolume");
@@ -1686,7 +1669,7 @@ bool ShouldScaleIn(ulong ticket)
         else
         {
             LogAction("Scale Error", "Last trade volume is zero but trades exist - attempting to recover volume");
-            // Try to recover volume from existing trades
+            // Try to recover volume from existing trades.
             for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
                 ulong ticket = PositionGetTicket(i);
@@ -1700,8 +1683,11 @@ bool ShouldScaleIn(ulong ticket)
         }
     }
     
+    // If none of the scaling conditions are met, return false.
     return false;
 }
+
+
 
 /*
 * OpenCounterTrade
@@ -1775,15 +1761,8 @@ void CheckTotalLosses()
     // Check if total losses exceed threshold
     if(totalLoss > TotalLosses)
     {
-        string alertMessage = StringFormat("WARNING: Total losses (%.2f) exceeded maximum allowed (%.2f).\nEA will be stopped for protection!", totalLoss, TotalLosses);
-        
-        LogAction("Risk Management", alertMessage);
-        Alert(alertMessage, "Risk Management - EA Stopped", MB_ICONEXCLAMATION);
-        
-        CloseAllTrades();  // Use the new faster method
-        
-        // Stop the EA
-        ExpertRemove();
+        LogAction("Risk Management", StringFormat("Total losses (%.2f) exceeded maximum allowed (%.2f)", totalLoss, TotalLosses));
+        CloseAllTrades();  // This will now handle the alert after closing positions
     }
 }
 
@@ -1792,38 +1771,41 @@ void CheckTotalLosses()
 //+------------------------------------------------------------------+
 void ForceTPSync()
 {
-    //Print("\n=== ForceTPSync Start ===");
-    //Print("g_inPhase1: ", g_inPhase1);
-    
     // Only proceed if we have trades in Phase 2
     int totalTrades = CountEATrades();
-    //Print("Total EA trades: ", totalTrades);
     
     if(totalTrades == 0)
-    {
-    //    Print("No trades to sync");
-    //    Print("=== ForceTPSync End ===\n");
         return;
-    }
     
     // Get current last trade
     ulong lastTicket = GetLastTradeTicket();
-    //Print("Last trade ticket: ", lastTicket);
     
     double syncTP = 0;
+    
+    // Track positions that failed modification
+    static CHashMap<ulong, datetime> failedPositions;
+    
+    // Clean up old failed positions (older than 5 minutes)
+    datetime currentTime = TimeCurrent();
+    ulong keysArray[];
+    failedPositions.GetKeys(keysArray);
+    
+    for(int i = 0; i < ArraySize(keysArray); i++)
+    {
+        datetime failTime;
+        if(failedPositions.TryGetValue(keysArray[i], failTime))
+        {
+            if(currentTime - failTime > 300) // 5 minutes
+                failedPositions.Remove(keysArray[i]);
+        }
+    }
     
     // If we can find the last trade, get its TP
     if(lastTicket != 0 && PositionSelectByTicket(lastTicket))
     {
         double lastTradeTP = PositionGetDouble(POSITION_TP);
-        string lastTradeComment = PositionGetString(POSITION_COMMENT);
         ENUM_POSITION_TYPE lastTradeType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
         double lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-        
-       // Print("Last trade details - Ticket: ", lastTicket, 
-       //       ", Type: ", (lastTradeType == POSITION_TYPE_BUY ? "BUY" : "SELL"),
-       //       ", TP: ", lastTradeTP,
-       //       ", Comment: ", lastTradeComment);
         
         // Always recalculate TP for the last trade based on its open price
         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -1848,7 +1830,6 @@ void ForceTPSync()
             request.tp = newTP;
             request.magic = g_magicNumber;
             
-            Print("Updating last trade TP to: ", newTP);
             bool success = OrderSend(request, result);
             
             if(success && result.retcode == TRADE_RETCODE_DONE)
@@ -1858,7 +1839,16 @@ void ForceTPSync()
             }
             else
             {
-                Print("Failed to update last trade TP. Error: ", GetLastError());
+                int error = GetLastError();
+                if(error == 4756)
+                {
+                    failedPositions.Add(lastTicket, currentTime);
+                    LogAction("TP Sync", StringFormat("Position %d modification disabled - skipping", lastTicket));
+                }
+                else
+                {
+                    Print("Failed to update last trade TP. Error: ", error);
+                }
                 return;  // Don't proceed if we can't update the last trade
             }
         }
@@ -1869,8 +1859,6 @@ void ForceTPSync()
     }
     else
     {
-        Print("Could not find last trade - sync aborted");
-        Print("=== ForceTPSync End ===\n");
         return;
     }
     
@@ -1883,6 +1871,10 @@ void ForceTPSync()
            PositionSelectByTicket(ticket) && 
            PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
         {
+            // Skip positions that recently failed modification
+            if(failedPositions.ContainsKey(ticket))
+                continue;
+                
             double currentTP = PositionGetDouble(POSITION_TP);
             
             // Only update if TP is different
@@ -1897,33 +1889,106 @@ void ForceTPSync()
                 request.tp = syncTP;
                 request.magic = g_magicNumber;
                 
-                Print("Syncing trade ", ticket, " TP to: ", syncTP);
                 bool success = OrderSend(request, result);
                 
                 if(success && result.retcode == TRADE_RETCODE_DONE)
                 {
                     updatedTrades++;
-                    Print("Successfully synced trade ", ticket);
+                    Print("Successfully synced trade ", ticket, " TP to: ", syncTP);
                 }
                 else
                 {
-                    Print("Failed to sync trade ", ticket, ". Error: ", GetLastError());
+                    int error = GetLastError();
+                    if(error == 4756)
+                    {
+                        failedPositions.Add(ticket, currentTime);
+                        LogAction("TP Sync", StringFormat("Position %d modification disabled - skipping", ticket));
+                    }
+                    else
+                    {
+                        Print("Failed to sync trade ", ticket, ". Error: ", error);
+                    }
                 }
             }
         }
     }
-    
-    if(updatedTrades > 0)
-    {
-        Print("Synced ", updatedTrades, " trades to TP: ", syncTP);
-    }
-    else
-    {
-   //   Print("No trades needed TP sync");
-    }
-    
-   // Print("=== ForceTPSync End ===\n");
 }
+
+// Add this class definition at the top of the file, after the includes
+template<typename TKey, typename TValue>
+class CHashMap
+{
+private:
+    TKey m_keys[];
+    TValue m_values[];
+    
+public:
+    void Add(TKey key, TValue value)
+    {
+        int size = ArraySize(m_keys);
+        ArrayResize(m_keys, size + 1);
+        ArrayResize(m_values, size + 1);
+        m_keys[size] = key;
+        m_values[size] = value;
+    }
+    
+    bool Remove(TKey key)
+    {
+        int size = ArraySize(m_keys);
+        for(int i = 0; i < size; i++)
+        {
+            if(m_keys[i] == key)
+            {
+                for(int j = i; j < size - 1; j++)
+                {
+                    m_keys[j] = m_keys[j + 1];
+                    m_values[j] = m_values[j + 1];
+                }
+                ArrayResize(m_keys, size - 1);
+                ArrayResize(m_values, size - 1);
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    bool ContainsKey(TKey key)
+    {
+        int size = ArraySize(m_keys);
+        for(int i = 0; i < size; i++)
+        {
+            if(m_keys[i] == key)
+                return true;
+        }
+        return false;
+    }
+    
+    bool TryGetValue(TKey key, TValue &value)
+    {
+        int size = ArraySize(m_keys);
+        for(int i = 0; i < size; i++)
+        {
+            if(m_keys[i] == key)
+            {
+                value = m_values[i];
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    void GetKeys(TKey &keys[])
+    {
+        ArrayResize(keys, ArraySize(m_keys));
+        ArrayCopy(keys, m_keys);
+    }
+    
+    void Clear()
+    {
+        ArrayResize(m_keys, 0);
+        ArrayResize(m_values, 0);
+    }
+};
 
 // Add new function for phase detection
 bool IsInPhase1()
@@ -1967,6 +2032,21 @@ void CloseAllTrades()
     CTrade trade;
     trade.SetExpertMagicNumber(g_magicNumber);
     
+    // Log the emergency closure first, without Alert
+    double totalLoss = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+        {
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            if(profit < 0)
+                totalLoss += MathAbs(profit);
+        }
+    }
+    
+    LogAction("Emergency Closure", StringFormat("Total losses: %.2f - Closing all positions", totalLoss));
+    
     // First pass: Set all TPs to current market price
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
@@ -2007,4 +2087,11 @@ void CloseAllTrades()
     g_lastScalePrice = 0;
     g_lastTradeVolume = StartingVolume;
     g_lastProfitTime = TimeCurrent();
+    
+    // Send alert after positions are closed
+    string alertMessage = StringFormat("WARNING: Total losses (%.2f) exceeded maximum allowed.\nAll positions have been closed!", totalLoss);
+    Alert(alertMessage);
+    
+    // Stop the EA
+    ExpertRemove();
 }
