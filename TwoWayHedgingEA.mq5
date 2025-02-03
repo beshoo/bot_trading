@@ -394,6 +394,18 @@ This EA requires continuous monitoring of:
 #property version   "1.00"
 #property strict
 
+// Add new enum for trading mode before the input parameters
+enum TRADING_MODE
+{
+    MODE_COUNTER_TRADES, // Counter Trades
+    MODE_SELL_ONLY,     // Sell Trade
+    MODE_BUY_ONLY       // Buy Trade
+};
+
+// Add trading mode parameter to input parameters
+input group           "Trading Mode Settings";
+input TRADING_MODE    TradingMode = MODE_COUNTER_TRADES;    // Trading Mode
+
 // Input Parameters
 input double StartingVolume = 0.01;       // Initial lot size
 input group           "Target has to be greater than distance";
@@ -964,15 +976,33 @@ void ManagePhase1()
     
     if(totalTrades == 0)
     {
-        LogAction("Starting Phase 1", "Opening initial trades");
-        // Open initial buy and sell trades with Phase1 comment
-        OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
-        OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
+        LogAction("Starting Phase 1", "Opening initial trades based on trading mode");
+        
+        switch(TradingMode)
+        {
+            case MODE_COUNTER_TRADES:
+                // Original behavior - open both buy and sell
+                OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
+                OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
+                break;
+                
+            case MODE_SELL_ONLY:
+                // Open only sell trade
+                OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
+                break;
+                
+            case MODE_BUY_ONLY:
+                // Open only buy trade
+                OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
+                break;
+        }
         g_lastTradeVolume = StartingVolume;
     }
-    else if(!IsInPhase1() && totalTrades >= 2)
+    else if(!IsInPhase1() && 
+            ((TradingMode == MODE_COUNTER_TRADES && totalTrades >= 2) || 
+             (TradingMode != MODE_COUNTER_TRADES && totalTrades >= 1)))
     {
-        // Switch to Phase 2 if we're not in Phase 1 and have enough trades
+        // Switch to Phase 2 based on trading mode conditions
         LogPhaseChange(false, totalTrades);
         g_inPhase1 = false;
         ForceTPSync();  // Sync TPs when entering Phase 2
@@ -1548,7 +1578,7 @@ double CalculatePointDifference(const string symbol, double price1, double price
       point = 0.01;
    }
    
-   // Return the difference in “points”
+   // Return the difference in "points"
    return diff / point;
 }
 //+------------------------------------------------------------------+
@@ -2006,7 +2036,6 @@ bool IsInPhase1()
             double volume = PositionGetDouble(POSITION_VOLUME);
             string comment = PositionGetString(POSITION_COMMENT);
             
-            // Check if this is a Phase 1 trade
             bool isPhase1Trade = (StringFind(comment, "Phase1") >= 0);
             
             if(type == POSITION_TYPE_BUY && isPhase1Trade)
@@ -2014,16 +2043,25 @@ bool IsInPhase1()
             else if(type == POSITION_TYPE_SELL && isPhase1Trade)
                 sellCount++;
                 
-            // Check if volume matches starting volume
-            if(MathAbs(volume - StartingVolume) > 0.001)  // Using small epsilon for float comparison
+            if(MathAbs(volume - StartingVolume) > 0.001)
                 hasNonStartingVolume = true;
         }
     }
     
-    // We're in Phase 1 if:
-    // 1. We have exactly one buy and one sell trade
-    // 2. All trades have starting volume
-    return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
+    // Check Phase 1 conditions based on trading mode
+    switch(TradingMode)
+    {
+        case MODE_COUNTER_TRADES:
+            return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
+            
+        case MODE_SELL_ONLY:
+            return (sellCount == 1 && buyCount == 0 && !hasNonStartingVolume);
+            
+        case MODE_BUY_ONLY:
+            return (buyCount == 1 && sellCount == 0 && !hasNonStartingVolume);
+    }
+    
+    return false;
 } 
 
 // Add this function to the file
