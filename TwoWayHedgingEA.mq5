@@ -987,25 +987,38 @@ void ManagePhase1()
                 break;
                 
             case MODE_SELL_ONLY:
-                // Open only sell trade
-                OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
+                // Open only sell trade and move directly to Phase 2
+                if(OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell"))
+                {
+                    g_inPhase1 = false;  // Move directly to Phase 2
+                    LogPhaseChange(false, 1);
+                    Sleep(50);  // Small delay to ensure trade is processed
+                    ForceTPSync();
+                }
                 break;
                 
             case MODE_BUY_ONLY:
-                // Open only buy trade
-                OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
+                // Open only buy trade and move directly to Phase 2
+                if(OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy"))
+                {
+                    g_inPhase1 = false;  // Move directly to Phase 2
+                    LogPhaseChange(false, 1);
+                    Sleep(50);  // Small delay to ensure trade is processed
+                    ForceTPSync();
+                }
                 break;
         }
         g_lastTradeVolume = StartingVolume;
     }
-    else if(!IsInPhase1() && 
-            ((TradingMode == MODE_COUNTER_TRADES && totalTrades >= 2) || 
-             (TradingMode != MODE_COUNTER_TRADES && totalTrades >= 1)))
+    else if(TradingMode == MODE_COUNTER_TRADES)
     {
-        // Switch to Phase 2 based on trading mode conditions
-        LogPhaseChange(false, totalTrades);
-        g_inPhase1 = false;
-        ForceTPSync();  // Sync TPs when entering Phase 2
+        // Only check for Phase 2 transition in counter trades mode
+        if(!IsInPhase1() && totalTrades >= 2)
+        {
+            LogPhaseChange(false, totalTrades);
+            g_inPhase1 = false;
+            ForceTPSync();
+        }
     }
 }
 
@@ -2023,6 +2036,11 @@ public:
 // Add new function for phase detection
 bool IsInPhase1()
 {
+    // For single-direction modes, always return false as we move directly to Phase 2
+    if(TradingMode == MODE_SELL_ONLY || TradingMode == MODE_BUY_ONLY)
+        return false;
+        
+    // Original Phase 1 check logic for counter trades mode
     int buyCount = 0;
     int sellCount = 0;
     bool hasNonStartingVolume = false;
@@ -2048,20 +2066,8 @@ bool IsInPhase1()
         }
     }
     
-    // Check Phase 1 conditions based on trading mode
-    switch(TradingMode)
-    {
-        case MODE_COUNTER_TRADES:
-            return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
-            
-        case MODE_SELL_ONLY:
-            return (sellCount == 1 && buyCount == 0 && !hasNonStartingVolume);
-            
-        case MODE_BUY_ONLY:
-            return (buyCount == 1 && sellCount == 0 && !hasNonStartingVolume);
-    }
-    
-    return false;
+    // Only check counter trades condition
+    return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
 } 
 
 // Add this function to the file
