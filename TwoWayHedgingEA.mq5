@@ -394,18 +394,6 @@ This EA requires continuous monitoring of:
 #property version   "1.00"
 #property strict
 
-// Add new enum for trading mode before the input parameters
-enum TRADING_MODE
-{
-    MODE_COUNTER_TRADES, // Counter Trades
-    MODE_SELL_ONLY,     // Sell Trade
-    MODE_BUY_ONLY       // Buy Trade
-};
-
-// Add trading mode parameter to input parameters
-input group           "Trading Mode Settings";
-input TRADING_MODE    TradingMode = MODE_COUNTER_TRADES;    // Trading Mode
-
 // Input Parameters
 input double StartingVolume = 0.01;       // Initial lot size
 input group           "Target has to be greater than distance";
@@ -976,49 +964,18 @@ void ManagePhase1()
     
     if(totalTrades == 0)
     {
-        LogAction("Starting Phase 1", "Opening initial trades based on trading mode");
-        
-        switch(TradingMode)
-        {
-            case MODE_COUNTER_TRADES:
-                // Original behavior - open both buy and sell
-                OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
-                OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
-                break;
-                
-            case MODE_SELL_ONLY:
-                // Open only sell trade and move directly to Phase 2
-                if(OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell"))
-                {
-                    g_inPhase1 = false;  // Move directly to Phase 2
-                    LogPhaseChange(false, 1);
-                    Sleep(50);  // Small delay to ensure trade is processed
-                    ForceTPSync();
-                }
-                break;
-                
-            case MODE_BUY_ONLY:
-                // Open only buy trade and move directly to Phase 2
-                if(OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy"))
-                {
-                    g_inPhase1 = false;  // Move directly to Phase 2
-                    LogPhaseChange(false, 1);
-                    Sleep(50);  // Small delay to ensure trade is processed
-                    ForceTPSync();
-                }
-                break;
-        }
+        LogAction("Starting Phase 1", "Opening initial trades");
+        // Open initial buy and sell trades with Phase1 comment
+        OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
+        OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
         g_lastTradeVolume = StartingVolume;
     }
-    else if(TradingMode == MODE_COUNTER_TRADES)
+    else if(!IsInPhase1() && totalTrades >= 2)
     {
-        // Only check for Phase 2 transition in counter trades mode
-        if(!IsInPhase1() && totalTrades >= 2)
-        {
-            LogPhaseChange(false, totalTrades);
-            g_inPhase1 = false;
-            ForceTPSync();
-        }
+        // Switch to Phase 2 if we're not in Phase 1 and have enough trades
+        LogPhaseChange(false, totalTrades);
+        g_inPhase1 = false;
+        ForceTPSync();  // Sync TPs when entering Phase 2
     }
 }
 
@@ -1570,76 +1527,30 @@ bool IsTradeClosedInProfit(ulong ticket)
 //+------------------------------------------------------------------+
 //| Calculate point difference between two prices for any symbol       |
 //+------------------------------------------------------------------+
-double CalculatePointDifferenceOld(const string symbol, double price1, double price2)
-{
-   // Calculate the raw price difference
-   double diff = price2 - price1;
-   
-   // Special handling for Gold (XAU) and Silver (XAG)
-   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 || StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
-   {
-       // For Gold, multiply by 100 to get the correct point value
-       return diff * 100.0;
-   }
-   else  // For forex pairs like EURUSD
-   {
-       // Get symbol digits and point
-       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-       
-       // For 5-digit brokers (where EURUSD is like 1.23456)
-       if(digits == 5)  // For 5-digit brokers (where EURUSD is like 1.23456)
-       {
-           Print("5-digit price format: ", DoubleToString(price1, 5), " -> ", DoubleToString(price2, 5));
-           return (diff / point) * 10;  // Multiply by 10 to get standard points
-       }
-       // For 3-digit brokers (where EURUSD is like 1.234)
-       else if(digits == 3)
-           return (diff / point) * 10;  // Multiply by 10 to get standard points
-       else  // For 4-digit brokers (where EURUSD is like 1.2345)
-           return diff / point;
-   }
-}
-
-
 double CalculatePointDifference(const string symbol, double price1, double price2)
 {
    // Calculate the raw price difference.
    double diff = price2 - price1;
    
-   // Check if the symbol is a metal.
-   // You can adjust this list as needed.
-   const string metals[] = {"XAU", "GOLD", "XAG", "SILVER", "XPT", "PLATINUM", "XPD", "PALLADIUM"};
-   for(int i = 0; i < ArraySize(metals); i++)
+   // Retrieve the minimal price increment (point) as reported by the broker.
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0)
    {
-      if(StringFind(symbol, metals[i]) != -1)
-      {
-         // For metals, define pip size as 0.01.
-         double pipSize = 0.01;
-         return diff / pipSize;  // Equivalent to diff * 100
-      }
+      Print("Error: Unable to determine the point value for symbol ", symbol);
+      return 0.0;
    }
    
-   // For non-metal instruments (Forex pairs):
-   // Get the minimal price increment ("point") and the number of digits.
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   if(point <= 0)
-      return 0;  // Safeguard against invalid point value
+   // For precious metals (Gold, Silver), override the point if needed.
+   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
+      StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0)
+   {
+      // For example, if you want to treat 0.01 price movement as 1 point:
+      point = 0.01;
+   }
    
-   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   
-   // Determine pip size for Forex pairs.
-   // Many non-JPY pairs are quoted with 5 digits (or JPY pairs with 3 digits)
-   // so one pip is 10 times the minimal price increment.
-   double pipSize = ((digits == 5) || (digits == 3)) ? point * 10 : point;
-   
-   return diff / pipSize;
+   // Return the difference in “points”
+   return diff / point;
 }
-
-
-
-
-
 //+------------------------------------------------------------------+
 //| Should Scale In function using the new point calculation         |
 //+------------------------------------------------------------------+
@@ -1664,25 +1575,20 @@ bool ShouldScaleIn(ulong ticket)
     // The function should return the difference as: (currentPrice - lastTradePrice)/point.
     double priceMove = CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);
     
-    // For debugging - log the actual point difference
-    static datetime lastDebugLog = 0;
-    if(TimeCurrent() - lastDebugLog >= 30)  // Log every 10 seconds
+    // Log movement details every 60 seconds (optional)
+    static datetime lastLogTime = 0;
+    if(TimeCurrent() - lastLogTime >= 60)
     {
-        // Get the number of digits for the symbol
-        int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-        
-        // Use the digits in the price format string
-        string priceFormat = StringFormat("%%.%df", digits);
-        
-        LogAction("Point Calculation", StringFormat(
-            "Symbol: %s, LastPrice: " + priceFormat + ", CurrentPrice: " + priceFormat + ", Points: %.1f, Required: %d",
-            _Symbol,
+        LogAction("Movement :", StringFormat(
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
+            g_lastTradeVolume,
+            (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+            priceMove,
+            FixedDistance,
             lastTradePrice,
-            currentPrice,
-            MathAbs(priceMove),
-            FixedDistance
+            currentPrice
         ));
-        lastDebugLog = TimeCurrent();
+        lastLogTime = TimeCurrent();
     }
     
     // Check that the market move is in the desired direction:
@@ -2087,11 +1993,6 @@ public:
 // Add new function for phase detection
 bool IsInPhase1()
 {
-    // For single-direction modes, always return false as we move directly to Phase 2
-    if(TradingMode == MODE_SELL_ONLY || TradingMode == MODE_BUY_ONLY)
-        return false;
-        
-    // Original Phase 1 check logic for counter trades mode
     int buyCount = 0;
     int sellCount = 0;
     bool hasNonStartingVolume = false;
@@ -2105,6 +2006,7 @@ bool IsInPhase1()
             double volume = PositionGetDouble(POSITION_VOLUME);
             string comment = PositionGetString(POSITION_COMMENT);
             
+            // Check if this is a Phase 1 trade
             bool isPhase1Trade = (StringFind(comment, "Phase1") >= 0);
             
             if(type == POSITION_TYPE_BUY && isPhase1Trade)
@@ -2112,12 +2014,15 @@ bool IsInPhase1()
             else if(type == POSITION_TYPE_SELL && isPhase1Trade)
                 sellCount++;
                 
-            if(MathAbs(volume - StartingVolume) > 0.001)
+            // Check if volume matches starting volume
+            if(MathAbs(volume - StartingVolume) > 0.001)  // Using small epsilon for float comparison
                 hasNonStartingVolume = true;
         }
     }
     
-    // Only check counter trades condition
+    // We're in Phase 1 if:
+    // 1. We have exactly one buy and one sell trade
+    // 2. All trades have starting volume
     return (buyCount == 1 && sellCount == 1 && !hasNonStartingVolume);
 } 
 
