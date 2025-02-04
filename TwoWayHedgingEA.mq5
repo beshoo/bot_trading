@@ -394,7 +394,7 @@ This EA requires continuous monitoring of:
 //|                                              TwoWayHedgingEA.mq5   |
 //|                                      Copyright 2024, Your Name      |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2024"
+#property copyright "Copyright 2025"
 #property link      ""
 #property version   "1.00"
 #property strict
@@ -1587,10 +1587,14 @@ bool ShouldScaleIn(ulong ticket)
     if(g_noMoneyErrorLogged)
         return false;
         
-    // Add minimum delay between scale attempts (5 seconds)
-    if(TimeCurrent() - lastScaleAttempt < 5)
-        return false;
-        
+    // Change delay from 5 seconds to 500ms
+    if(TimeCurrent() - lastScaleAttempt < 1)  // Changed from 5 to 1 second for datetime comparison
+    {
+        // For more precise timing, check milliseconds
+        if(GetTickCount() - (lastScaleAttempt * 1000) < 500)  // 500ms delay
+            return false;
+    }
+    
     if(!PositionSelectByTicket(ticket))
         return false;
         
@@ -1630,6 +1634,22 @@ bool ShouldScaleIn(ulong ticket)
     // Only update last scale attempt if we're actually going to scale
     if(directionOk && distanceOk)  // This is equivalent to if(MathAbs(priceMove) >= FixedDistance && directionOk)
     {
+        // Add a small delay and recheck price to ensure stability
+        Sleep(200);  // 200ms delay
+        
+        // Recheck price after delay
+        double verifyPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                                     : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        
+        double verifyMove = CalculatePointDifference(_Symbol, lastTradePrice, verifyPrice);
+        
+        // Verify the price movement is still valid after delay
+        if(MathAbs(verifyMove) < FixedDistance)
+        {
+            LogAction("Scale Verification", "Price movement no longer valid after delay check");
+            return false;
+        }
+        
         // Prevent scaling if price hasn't moved enough from last scale price
         if(lastScalePrice != 0)
         {
