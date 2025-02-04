@@ -1,5 +1,10 @@
 //+------------------------------------------------------------------+
 //|                     TwoWayHedgingEA - Technical Documentation        |
+#property copyright "Telegram: @deep2trade"
+#property version   "2.00"
+#property description "Deep2Trade is a cutting-edge Forex trading bot that employs a sophisticated Martingale strategy alongside robust risk management.\n"\
+                     "Using technical analysis and dynamic stop loss methods, it fine-tunes trade entries and exits.\n"\
+                     "Perfect for beginners and experts, it targets up to 79% profit potential."
 //+------------------------------------------------------------------+
 #include <Trade/Trade.mqh>
 /*
@@ -883,6 +888,12 @@ void OnTick()
     // Add hold time check before starting Phase 1 trades
     if(g_inPhase1 && CountEATrades() == 0)
     {
+        static datetime lastAttempt = 0;
+        if(TimeCurrent() - lastAttempt < 1)  // Add 1-second delay between attempts
+            return;
+            
+        lastAttempt = TimeCurrent();
+        
         // Check if we're still in hold time
         if(g_lastProfitTime > 0 && TimeCurrent() - g_lastProfitTime < TradeHoldTime)
         {
@@ -890,8 +901,7 @@ void OnTick()
         }
         
         LogAction("Starting Phase 1", "Opening initial trades");
-        // Main trading logic with proper TP management
-        ManagePhase1();
+        ManagePhase1();  // Call only once
     }
     else
     {
@@ -899,12 +909,12 @@ void OnTick()
         if(g_inPhase1)
         {
             UpdateAllTakeProfiles();
-            ManagePhase1();
+            // No need to call ManagePhase1() here since we already have trades
         }
         else
         {
             // In Phase 2, sync TPs first, then manage trading
-            if(currentTradeCount > 0)
+            if(CountEATrades() > 0)
             {
                 ForceTPSync();  // Force sync every tick in Phase 2
                 Sleep(50);  // Small delay after sync
@@ -960,15 +970,28 @@ bool IsWithinTradingHours()
 */
 void ManagePhase1()
 {
+    static datetime lastTradeTime = 0;
     int totalTrades = CountEATrades();
     
+    // Add delay between trade attempts (at least 1 second)
+    if(TimeCurrent() - lastTradeTime < 1)
+        return;
+        
     if(totalTrades == 0)
     {
         LogAction("Starting Phase 1", "Opening initial trades");
-        // Open initial buy and sell trades with Phase1 comment
-        OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy");
-        OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell");
-        g_lastTradeVolume = StartingVolume;
+        
+        // Open initial buy trade
+        if(OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy"))
+        {
+            Sleep(50);  // Small delay between trades
+            // Only open sell trade if buy trade was successful
+            if(OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell"))
+            {
+                lastTradeTime = TimeCurrent();
+                g_lastTradeVolume = StartingVolume;
+            }
+        }
     }
     else if(!IsInPhase1() && totalTrades >= 2)
     {
@@ -1548,7 +1571,7 @@ double CalculatePointDifference(const string symbol, double price1, double price
       point = 0.01;
    }
    
-   // Return the difference in “points”
+   // Return the difference in "points"
    return diff / point;
 }
 //+------------------------------------------------------------------+
@@ -1556,23 +1579,30 @@ double CalculatePointDifference(const string symbol, double price1, double price
 //+------------------------------------------------------------------+
 bool ShouldScaleIn(ulong ticket)
 {
+    // Add static variables for tracking last scale attempt
+    static datetime lastScaleAttempt = 0;
+    static double lastScalePrice = 0;
+    
     // Check if money errors have been logged
     if(g_noMoneyErrorLogged)
+        return false;
+        
+    // Add minimum delay between scale attempts (5 seconds)
+    if(TimeCurrent() - lastScaleAttempt < 5)
         return false;
         
     if(!PositionSelectByTicket(ticket))
         return false;
         
-    // Retrieve the order type and last trade's open price.
+    // Retrieve the order type and last trade's open price
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
     double lastTradePrice = PositionGetDouble(POSITION_PRICE_OPEN);
     
-    // For BUY positions use the Bid, for SELL positions use the Ask.
+    // For BUY positions use the Bid, for SELL positions use the Ask
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     
-    // Calculate the price move in points using our generic function.
-    // The function should return the difference as: (currentPrice - lastTradePrice)/point.
+    // Calculate the price move in points using our generic function
     double priceMove = CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);
     
     // Log movement details every 60 seconds (optional)
@@ -1591,15 +1621,26 @@ bool ShouldScaleIn(ulong ticket)
         lastLogTime = TimeCurrent();
     }
     
-    // Check that the market move is in the desired direction:
-    // For BUY: currentPrice should be lower than lastTradePrice (priceMove negative)
-    // For SELL: currentPrice should be higher than lastTradePrice (priceMove positive)
+    // Check direction and required distance
     bool directionOk = (type == ORDER_TYPE_BUY && currentPrice < lastTradePrice) ||
-                       (type == ORDER_TYPE_SELL && currentPrice > lastTradePrice);
+                      (type == ORDER_TYPE_SELL && currentPrice > lastTradePrice);
+                      
+    bool distanceOk = MathAbs(priceMove) >= FixedDistance;
     
-    // If the absolute move in points exceeds or equals the FixedDistance and direction is correct, scale in.
-    if(MathAbs(priceMove) >= FixedDistance && directionOk)
+    // Only update last scale attempt if we're actually going to scale
+    if(directionOk && distanceOk)  // This is equivalent to if(MathAbs(priceMove) >= FixedDistance && directionOk)
     {
+        // Prevent scaling if price hasn't moved enough from last scale price
+        if(lastScalePrice != 0)
+        {
+            double moveFromLastScale = CalculatePointDifference(_Symbol, lastScalePrice, currentPrice);
+            if(MathAbs(moveFromLastScale) < FixedDistance)
+                return false;
+        }
+        
+        lastScaleAttempt = TimeCurrent();
+        lastScalePrice = currentPrice;
+        
         // Optional logging for scale condition met
         LogAction("Scale Condition Met", StringFormat(
             "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
@@ -1611,7 +1652,7 @@ bool ShouldScaleIn(ulong ticket)
             currentPrice
         ));
         
-        // Calculate the new volume (doubling in this case using ScalePercent of 100).
+        // Calculate the new volume (using ScalePercent)
         double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent) / 100.0), 2);
         LogAction("Volume Calculation", StringFormat(
             "PositionID: %d, LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
@@ -1621,7 +1662,7 @@ bool ShouldScaleIn(ulong ticket)
             newVolume
         ));
         
-        // Validate volume against broker limits.
+        // Validate volume against broker limits
         double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
         double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
         double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -1635,13 +1676,13 @@ bool ShouldScaleIn(ulong ticket)
             return false;
         }
         
-        // Round to the nearest valid step.
+        // Round to the nearest valid step
         newVolume = NormalizeDouble(MathRound(newVolume / stepVolume) * stepVolume, 2);
         
-        // Attempt to open the new trade with the calculated volume.
+        // Attempt to open the new trade with the calculated volume
         if(OpenTrade(type, newVolume, "Scale_In"))
         {
-            // Update global tracking variables after a successful scale-in.
+            // Update global tracking variables after a successful scale-in
             g_lastTradeVolume = newVolume;
             g_lastScalePrice = currentPrice;
             LogAction("Scale Success", StringFormat(
@@ -1657,10 +1698,10 @@ bool ShouldScaleIn(ulong ticket)
         }
     }
     
-    // Safety check: Ensure g_lastTradeVolume is not zero.
+    // Safety check: Ensure g_lastTradeVolume is not zero
     if(g_lastTradeVolume == 0)
     {
-        // If no trades exist, reset to the starting volume.
+        // If no trades exist, reset to the starting volume
         if(CountEATrades() == 0)
         {
             LogAction("Scale Error", "Last trade volume is zero - no trades exist, using StartingVolume");
@@ -1669,7 +1710,7 @@ bool ShouldScaleIn(ulong ticket)
         else
         {
             LogAction("Scale Error", "Last trade volume is zero but trades exist - attempting to recover volume");
-            // Try to recover volume from existing trades.
+            // Try to recover volume from existing trades
             for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
                 ulong ticket = PositionGetTicket(i);
@@ -1683,7 +1724,6 @@ bool ShouldScaleIn(ulong ticket)
         }
     }
     
-    // If none of the scaling conditions are met, return false.
     return false;
 }
 
