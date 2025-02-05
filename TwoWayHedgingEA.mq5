@@ -9,12 +9,49 @@
 #include <Trade/Trade.mqh>
 /*
 OVERVIEW:
-This Expert Advisor implements a sophisticated two-phase hedging strategy with dynamic 
-position scaling and synchronized take profit management. The EA operates in two distinct
-phases with different trade management approaches in each phase, utilizing a complex
-system of trade synchronization and TP management.
+This Expert Advisor implements a sophisticated trading strategy with three distinct modes:
+Counter Trade, Direct Sell, and Direct Buy. Each mode has specific behavior and trade management
+approaches.
+
+TRADING MODES:
+
+1. Counter Trade (TRADE_COUNTER):
+   * Traditional two-phase hedging strategy
+   * Phase 1: Opens counter-positions (buy/sell) with equal volume
+   * Phase 2: Implements dynamic scaling after TP hit
+   * Full hedging protection with synchronized TP management
+
+2. Sell Trade (TRADE_SELL):
+   * Skips Phase 1 completely
+   * Starts directly in Phase 2
+   * Opens a single SELL trade at StartingVolume
+   * Implements scaling and TP management as in Phase 2
+   * No counter-trades or hedging
+
+3. Buy Trade (TRADE_BUY):
+   * Skips Phase 1 completely
+   * Starts directly in Phase 2
+   * Opens a single BUY trade at StartingVolume
+   * Implements scaling and TP management as in Phase 2
+   * No counter-trades or hedging
+
+MODE SELECTION:
+* Controlled via TradeDirection input parameter
+* Mode cannot be changed while trades are open
+* Each mode maintains its own trade progression
+* All modes share the same risk management parameters
 
 CRITICAL TECHNICAL DETAILS:
+
+1. Take Profit Synchronization:
+   Counter Trade Mode:
+   * Phase 1 - Independent TPs
+   * Phase 2 - Synchronized TPs
+   
+   Direct Trade Modes (Buy/Sell):
+   * Always uses Phase 2 TP management
+   * All trades synchronized to last trade's TP
+   * Manual TP changes propagate to all trades
 
 1. Take Profit Synchronization:
    Phase 1 - Independent TPs:
@@ -437,6 +474,7 @@ static double g_lastSyncedTP = 0;  // Track the last synced TP value
 static datetime g_lastTPCheck = 0;  // Track when we last checked TPs
 static datetime g_lastTPUpdateLog = 0;  // Track when we last logged a TP update message
 double g_lastKnownGoodTP = 0;  // Store the last known good TP value
+ENUM_TRADE_DIRECTION g_activeTradeDirection = TRADE_COUNTER;  // Track active trading direction
 
 //+------------------------------------------------------------------+
 //| Logging Functions                                                  |
@@ -733,6 +771,34 @@ int OnInit()
     
     LogAction("EA Initialized", StringFormat("Magic Number: %d", g_magicNumber));
     PrintScalingSequence();
+    
+    // Initialize active trade direction
+    if(CountEATrades() == 0)
+    {
+        // No trades - use the input parameter
+        g_activeTradeDirection = TradeDirection;
+    }
+    else
+    {
+        // Trades exist - determine direction from existing trades
+        ulong ticket = GetLastTradeTicket();
+        if(PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            if(posType == POSITION_TYPE_BUY)
+                g_activeTradeDirection = TRADE_BUY;
+            else
+                g_activeTradeDirection = TRADE_SELL;
+                
+            if(g_activeTradeDirection != TradeDirection)
+            {
+                LogAction("Direction Mismatch", StringFormat(
+                    "Current trades are %s, new direction will take effect after Phase 2 completes",
+                    g_activeTradeDirection == TRADE_BUY ? "BUY" : "SELL"
+                ));
+            }
+        }
+    }
     
     return(INIT_SUCCEEDED);
 }
