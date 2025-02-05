@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                     TwoWayHedgingEA - Technical Documentation        |
 #property copyright "Telegram: @deep2trade"
-#property version   "2.04"
+#property version   "2.05"
 #property description "Deep2Trade is a cutting-edge Forex trading bot that employs a sophisticated Martingale strategy alongside robust risk management.\n"\
                      "Using technical analysis and dynamic stop loss methods, it fine-tunes trade entries and exits.\n"\
                      "Perfect for beginners and experts, it targets up to 79% profit potential."
