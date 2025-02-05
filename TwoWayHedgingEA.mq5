@@ -425,6 +425,47 @@ This EA requires continuous monitoring of:
 3. Phase transition timing
 4. Error handling effectiveness
 5. Position tracking accuracy
+
+INITIALIZATION BEHAVIOR:
+
+1. Trade Configuration Detection:
+   * EA analyzes existing trades on startup
+   * Determines trading mode and phase automatically
+   * Handles three scenarios:
+
+   Counter Trading Detection:
+   * Exactly one buy and one sell trade present
+   * Sets to Phase 1 automatically
+   * Enables counter trading mode
+   * Maintains independent TPs
+
+   Directional Trading Detection:
+   * Multiple trades of same type (all buy or all sell)
+   * Sets to Phase 2 automatically
+   * Enables directional trading mode (BUY/SELL)
+   * Synchronizes TPs for all trades
+
+   No Trades:
+   * Uses input parameter TradeDirection
+   * Starts in Phase 1 for counter trading
+   * Starts in Phase 2 for directional trading
+
+2. Volume Management on Startup:
+   * Analyzes volumes of existing trades
+   * Sets g_lastTradeVolume to largest found volume
+   * Ensures proper scaling progression
+   * Uses StartingVolume if no trades exist
+
+3. TP Synchronization on Startup:
+   * Forces TP sync if entering Phase 2
+   * Maintains independent TPs in Phase 1
+   * Preserves existing TPs when appropriate
+
+4. State Logging:
+   * Logs detailed initialization state
+   * Records trade configuration found
+   * Documents phase and direction decisions
+   * Tracks volume initialization
 */
 
 //+------------------------------------------------------------------+
@@ -706,6 +747,94 @@ int OnInit()
     int totalTrades = CountEATrades();
     Print("OnInit - Current state:");
     Print("Total EA trades: ", totalTrades);
+    
+    // Initialize active trade direction and phase based on existing trades
+    if(totalTrades > 0)
+    {
+        // First, analyze all existing trades
+        int buyCount = 0;
+        int sellCount = 0;
+        double maxVolume = 0;
+        
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = PositionGetTicket(i);
+            if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == g_magicNumber)
+            {
+                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                double volume = PositionGetDouble(POSITION_VOLUME);
+                
+                // Track volume for scaling
+                if(volume > maxVolume)
+                    maxVolume = volume;
+                
+                // Count trade types
+                if(posType == POSITION_TYPE_BUY)
+                    buyCount++;
+                else if(posType == POSITION_TYPE_SELL)
+                    sellCount++;
+            }
+        }
+        
+        // Determine if we have directional trades
+        bool isDirectionalTrading = (buyCount > 0 && sellCount == 0) || (sellCount > 0 && buyCount == 0);
+        
+        if(isDirectionalTrading)
+        {
+            // We have only buy trades or only sell trades - enter Phase 2
+            g_inPhase1 = false;
+            g_activeTradeDirection = (buyCount > 0) ? TRADE_BUY : TRADE_SELL;
+            g_lastTradeVolume = maxVolume;
+            
+            LogAction("Initialization", StringFormat(
+                "Found %d %s trades - entering Phase 2 scaling mode",
+                (buyCount > 0) ? buyCount : sellCount,
+                g_activeTradeDirection == TRADE_BUY ? "BUY" : "SELL"
+            ));
+            
+            // Force TP sync for existing trades
+            ForceTPSync();
+        }
+        else if(buyCount == 1 && sellCount == 1)
+        {
+            // We have one buy and one sell - this is Phase 1 counter trading
+            g_inPhase1 = true;
+            g_activeTradeDirection = TRADE_COUNTER;
+            g_lastTradeVolume = maxVolume;
+            
+            LogAction("Initialization", "Found counter trades in Phase 1");
+        }
+        else
+        {
+            // Unexpected trade configuration - log warning
+            LogAction("Warning", StringFormat(
+                "Unexpected trade configuration found: %d buy, %d sell trades",
+                buyCount, sellCount
+            ));
+            
+            // Default to counter trading mode
+            g_inPhase1 = true;
+            g_activeTradeDirection = TRADE_COUNTER;
+            g_lastTradeVolume = maxVolume;
+        }
+    }
+    else
+    {
+        // No existing trades - initialize based on input parameter
+        g_activeTradeDirection = TradeDirection;
+        g_inPhase1 = (TradeDirection == TRADE_COUNTER);
+        g_lastTradeVolume = StartingVolume;
+    }
+    
+    // Log the initialization state
+    LogAction("Initialization State", StringFormat(
+        "Phase: %s, Direction: %s, Trades: %d, LastVolume: %.2f",
+        g_inPhase1 ? "1" : "2",
+        g_activeTradeDirection == TRADE_COUNTER ? "COUNTER" :
+        g_activeTradeDirection == TRADE_BUY ? "BUY" : "SELL",
+        totalTrades,
+        g_lastTradeVolume
+    ));
     
     // Initialize based on trade direction
     if(TradeDirection != TRADE_COUNTER)
