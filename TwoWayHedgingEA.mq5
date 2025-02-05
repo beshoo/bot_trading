@@ -399,7 +399,16 @@ This EA requires continuous monitoring of:
 #property version   "1.00"
 #property strict
 
+// Add trade direction enum
+enum ENUM_TRADE_DIRECTION
+{
+    TRADE_COUNTER,    // Counter Trade
+    TRADE_SELL,       // Sell Trade
+    TRADE_BUY         // Buy Trade
+};
+
 // Input Parameters
+input ENUM_TRADE_DIRECTION TradeDirection = TRADE_COUNTER;  // Trading Direction
 input double StartingVolume = 0.01;       // Initial lot size
 input group           "Target has to be greater than distance";
 
@@ -660,6 +669,18 @@ int OnInit()
     Print("OnInit - Current state:");
     Print("Total EA trades: ", totalTrades);
     
+    // Initialize based on trade direction
+    if(TradeDirection != TRADE_COUNTER)
+    {
+        g_inPhase1 = false;  // Skip Phase 1 for directional trades
+        LogAction("Initialization", StringFormat("Direct %s trading mode selected", 
+                 TradeDirection == TRADE_SELL ? "SELL" : "BUY"));
+    }
+    else
+    {
+        LogAction("Initialization", "Counter trading mode selected");
+    }
+    
     // Determine initial phase based on trades
     g_inPhase1 = IsInPhase1();
     Print("Current Phase: ", g_inPhase1 ? "Phase 1" : "Phase 2");
@@ -885,23 +906,42 @@ void OnTick()
     
     lastTradeCount = currentTradeCount;
     
-    // Add hold time check before starting Phase 1 trades
+    // Handle direct trading modes
+    if(TradeDirection != TRADE_COUNTER && CountEATrades() == 0)
+    {
+        // Open direct trade in Phase 2
+        ENUM_ORDER_TYPE tradeType = (TradeDirection == TRADE_SELL) ? 
+                                   ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+        
+        if(OpenTrade(tradeType, StartingVolume, "Direct_Trade"))
+        {
+            g_lastTradeVolume = StartingVolume;
+            LogAction("Direct Trade", StringFormat("Opened %s trade in Phase 2", 
+                     TradeDirection == TRADE_SELL ? "SELL" : "BUY"));
+            Sleep(50);
+            ForceTPSync();
+        }
+        return;
+    }
+
+    // Existing counter trade logic
     if(g_inPhase1 && CountEATrades() == 0)
     {
         static datetime lastAttempt = 0;
-        if(TimeCurrent() - lastAttempt < 1)  // Add 1-second delay between attempts
+        if(TimeCurrent() - lastAttempt < 1)
             return;
             
         lastAttempt = TimeCurrent();
         
-        // Check if we're still in hold time
         if(g_lastProfitTime > 0 && TimeCurrent() - g_lastProfitTime < TradeHoldTime)
-        {
-            return;  // Don't open new trades during hold time
-        }
+            return;
         
-        LogAction("Starting Phase 1", "Opening initial trades");
-        ManagePhase1();  // Call only once
+        // Only execute Phase 1 for counter trading
+        if(TradeDirection == TRADE_COUNTER)
+        {
+            LogAction("Starting Phase 1", "Opening counter trades");
+            ManagePhase1();
+        }
     }
     else
     {
@@ -970,21 +1010,24 @@ bool IsWithinTradingHours()
 */
 void ManagePhase1()
 {
+    // Only proceed if in counter trade mode
+    if(TradeDirection != TRADE_COUNTER)
+        return;
+
     static datetime lastTradeTime = 0;
     int totalTrades = CountEATrades();
     
-    // Add delay between trade attempts (at least 1 second)
     if(TimeCurrent() - lastTradeTime < 1)
         return;
         
     if(totalTrades == 0)
     {
-        LogAction("Starting Phase 1", "Opening initial trades");
+        LogAction("Starting Phase 1", "Opening counter trades");
         
         // Open initial buy trade
         if(OpenTrade(ORDER_TYPE_BUY, StartingVolume, "Phase1_Buy"))
         {
-            Sleep(50);  // Small delay between trades
+            Sleep(50);
             // Only open sell trade if buy trade was successful
             if(OpenTrade(ORDER_TYPE_SELL, StartingVolume, "Phase1_Sell"))
             {

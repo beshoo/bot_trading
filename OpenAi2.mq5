@@ -54,6 +54,26 @@ bool InpShowAbout = false;              // Show About Message on Start
 #define SCREENSHOT_HEIGHT 768   // Screenshot height in pixels
 #define SCREENSHOT_PATH "\\Screenshots\\"  // Subfolder for screenshots
 
+// Add this enum after the existing ENUM_RISK_LEVEL definition
+enum ENUM_BOT_TYPE {
+    BOT_AI_INDICATOR = 0,    // AI Indicator
+    BOT_AI_TRADER = 1        // AI Trader
+};
+
+// Add this input parameter with other input parameters
+input ENUM_BOT_TYPE InpBotType = BOT_AI_TRADER;    // Bot Type
+
+// Add these constants for arrow properties
+#define ARROW_OFFSET 3           // Offset from high/low price
+#define ARROW_SIZE 5             // Size of the arrow
+#define ARROW_COLOR_BUY clrLime  // Color for buy signals
+#define ARROW_COLOR_SELL clrRed  // Color for sell signals
+#define ARROW_COLOR_HOLD clrGray // Color for hold signals
+
+// Add these object name prefixes
+#define OBJ_PREFIX_SIGNAL "AI_Signal_"
+#define OBJ_PREFIX_CONF "AI_Conf_"
+
 //| Complex pattern detection structure                               |
 //+------------------------------------------------------------------+
 struct PatternInfo {
@@ -1453,19 +1473,13 @@ string SendToGPT(string analysis) {
 void ProcessTradeSignal(string response) {
     if(response == "") return;
     
-        // Check active trades count
-    totalActiveTrades = CountActiveTrades();
-    if(totalActiveTrades >= InpMaxActiveTrades) {
-        Print("Maximum active trades (", InpMaxActiveTrades, ") reached. Skipping new trade signal.");
-        return;
-    }
-    
     CJAVal json;
     if(!json.Deserialize(response)) {
         Print("Failed to parse JSON response");
         return;
     }
     
+    // Get signal details
     string signal = json["trade_signal"].ToStr();
     string entry_type = json["entry_type"].ToStr();
     string risk_level = json["risk_level"].ToStr();
@@ -1499,70 +1513,69 @@ void ProcessTradeSignal(string response) {
     // Get current prices
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   /* 
-    // Log the analysis
-    Print("AI Analysis - Signal: ", signal, 
-          ", Entry Type: ", entry_type,
-          ", Risk Level: ", risk_level,
-          ", Confidence: ", confidence, "%",
-          "\nStop Loss: ", stop_loss_pips, " pips",
-          ", Take Profit: ", take_profit_pips, " pips",
-          ", Lot Size: ", lot_size,
-          ", Risk/Reward: ", risk_reward,
-          "\nReasoning: ", reasoning);
-    */
-    // Only execute trades with sufficient confidence
+    
+    // Only execute if confidence meets minimum requirement
     if(confidence >= InpMinConfidence) {
-        double entry_price = 0;
-        double stop_loss = 0;
-        double take_profit = 0;
-        
-        // Calculate entry, stop loss, and take profit prices based on entry type
-        if(signal == "BUY") { 
-        
-            if(entry_type == "IMMEDIATE") {
-                entry_price = ask;
-                stop_loss = entry_price - stop_loss_points;
-                take_profit = entry_price + take_profit_points;
-                OpenBuyOrder(lot_size, stop_loss, take_profit);
+        if(InpBotType == BOT_AI_INDICATOR) {
+            // Always draw signal in indicator mode
+            DrawSignal(signal, confidence, bid, TimeCurrent());
+            Print("AI Indicator Signal: ", signal, " with ", confidence, "% confidence");
+        }
+        else {
+            // Trading mode - proceed with order placement
+            double entry_price = 0;
+            double stop_loss = 0;
+            double take_profit = 0;
+            
+            if(signal == "BUY") {
+                if(entry_type == "IMMEDIATE") {
+                    entry_price = ask;
+                    stop_loss = entry_price - stop_loss_points;
+                    take_profit = entry_price + take_profit_points;
+                    OpenBuyOrder(lot_size, stop_loss, take_profit);
+                }
+                else if(entry_type == "LIMIT") {
+                    entry_price = bid - (pip_value * 2);
+                    stop_loss = entry_price - stop_loss_points;
+                    take_profit = entry_price + take_profit_points;
+                    OpenBuyLimitOrder(lot_size, entry_price, stop_loss, take_profit);
+                }
+                else {
+                    Print("AI Analysis - Flat Market");
+                }
             }
-            else if(entry_type == "LIMIT") {
-                // Place buy limit slightly below current price
-                entry_price = bid - (pip_value * 2); // 2 pips below current price
-                stop_loss = entry_price - stop_loss_points;
-                take_profit = entry_price + take_profit_points;
-                OpenBuyLimitOrder(lot_size, entry_price, stop_loss, take_profit);
-            }else{
-             Print("AI Analysis - Flat Market ");
+            else if(signal == "SELL") {
+                if(entry_type == "IMMEDIATE") {
+                    entry_price = bid;
+                    stop_loss = entry_price + stop_loss_points;
+                    take_profit = entry_price - take_profit_points;
+                    OpenSellOrder(lot_size, stop_loss, take_profit);
+                }
+                else if(entry_type == "LIMIT") {
+                    entry_price = ask + (pip_value * 2);
+                    stop_loss = entry_price + stop_loss_points;
+                    take_profit = entry_price - take_profit_points;
+                    OpenSellLimitOrder(lot_size, entry_price, stop_loss, take_profit);
+                }
+                else {
+                    Print("AI Analysis - Flat Market");
+                }
+            }
+            else {  // HOLD signal
+                Print("AI Analysis - HOLD signal received");
             }
         }
-        else if(signal == "SELL") {
-        
-            if(entry_type == "IMMEDIATE") {
-                entry_price = bid;
-                stop_loss = entry_price + stop_loss_points;
-                take_profit = entry_price - take_profit_points;
-                OpenSellOrder(lot_size, stop_loss, take_profit);
-            }
-            else if(entry_type == "LIMIT") {
-                // Place sell limit slightly above current price
-                entry_price = ask + (pip_value * 2); // 2 pips above current price
-                stop_loss = entry_price + stop_loss_points;
-                take_profit = entry_price - take_profit_points;
-                OpenSellLimitOrder(lot_size, entry_price, stop_loss, take_profit);
-            }else{
-             Print("AI Analysis - Flat Market ");
-            }
+    }
+    else {
+        if(InpBotType == BOT_AI_INDICATOR) {
+            // Draw low confidence signal in indicator mode
+            DrawSignal(signal, confidence, bid, TimeCurrent());
+            Print("AI Indicator Low Confidence Signal: ", signal, " with ", confidence, "% confidence");
         }
-        
-        if(entry_price > 0) {
-            Print("Trade executed - Entry Price: ", entry_price,
-                  ", Stop Loss: ", stop_loss,
-                  ", Take Profit: ", take_profit);
+        else {
+            Print("Signal ignored - Confidence level ", confidence, 
+                  "% below minimum requirement of ", InpMinConfidence, "%");
         }
-    } else {
-        Print("Trade signal ignored - Confidence level ", confidence, 
-              "% below minimum requirement of ", InpMinConfidence, "%");
     }
 }
 
@@ -4359,4 +4372,78 @@ bool IsMarketTooVolatile(const int bands_handle, const string symbol, const ENUM
     // 1. Band width is more than 2% of price
     // 2. Price changed more than 0.5% in last 3 candles
     return (bandWidth > 0.02 || priceChange > 0.5);
+}
+
+//+------------------------------------------------------------------+
+//| Draw trading signal on chart                                       |
+//+------------------------------------------------------------------+
+void DrawSignal(string signal, int confidence, double price, datetime time) {
+    static int signal_counter = 0;
+    signal_counter++;
+    
+    // Create unique names for the objects
+    string signal_name = OBJ_PREFIX_SIGNAL + IntegerToString(signal_counter);
+    string conf_name = OBJ_PREFIX_CONF + IntegerToString(signal_counter);
+    
+    // Delete old objects if they exist
+    ObjectDelete(0, signal_name);
+    ObjectDelete(0, conf_name);
+    
+    // Set arrow code and color based on signal
+    int arrow_code;
+    color arrow_color;
+    double arrow_price;
+    
+    if(signal == "BUY") {
+        arrow_code = 233;  // Up arrow symbol
+        arrow_color = ARROW_COLOR_BUY;
+        // Place arrow below the low price with offset
+        arrow_price = iLow(_Symbol, PERIOD_CURRENT, 0) - (20 * Point());
+    }
+    else if(signal == "SELL") {
+        arrow_code = 234;  // Down arrow symbol
+        arrow_color = ARROW_COLOR_SELL;
+        // Place arrow above the high price with offset
+        arrow_price = iHigh(_Symbol, PERIOD_CURRENT, 0) + (20 * Point());
+    }
+    else {  // HOLD
+        arrow_code = 251;  // Circle symbol
+        arrow_color = ARROW_COLOR_HOLD;
+        arrow_price = iClose(_Symbol, PERIOD_CURRENT, 0);
+    }
+    
+    // Create the arrow
+    if(!ObjectCreate(0, signal_name, OBJ_ARROW, 0, time, arrow_price)) {
+        Print("Failed to create arrow object! Error: ", GetLastError());
+        return;
+    }
+    
+    // Set arrow properties with correct parameter types
+    ObjectSetInteger(0, signal_name, OBJPROP_ARROWCODE, (long)arrow_code);
+    ObjectSetInteger(0, signal_name, OBJPROP_COLOR, (long)arrow_color);
+    ObjectSetInteger(0, signal_name, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, signal_name, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+    ObjectSetInteger(0, signal_name, OBJPROP_HIDDEN, 0);
+    ObjectSetInteger(0, signal_name, OBJPROP_SELECTABLE, 0);
+    ObjectSetInteger(0, signal_name, OBJPROP_SELECTED, 0);
+    ObjectSetInteger(0, signal_name, OBJPROP_BACK, 0);
+    
+    // Create the confidence text
+    if(!ObjectCreate(0, conf_name, OBJ_TEXT, 0, time, arrow_price)) {
+        Print("Failed to create confidence text object! Error: ", GetLastError());
+        return;
+    }
+    
+    // Set text properties with correct parameter types
+    ObjectSetString(0, conf_name, OBJPROP_TEXT, IntegerToString(confidence) + "%");
+    ObjectSetInteger(0, conf_name, OBJPROP_COLOR, (long)arrow_color);
+    ObjectSetInteger(0, conf_name, OBJPROP_FONTSIZE, 8);
+    ObjectSetInteger(0, conf_name, OBJPROP_ANCHOR, ANCHOR_LOWER);
+    ObjectSetInteger(0, conf_name, OBJPROP_HIDDEN, 0);
+    ObjectSetInteger(0, conf_name, OBJPROP_SELECTABLE, 0);
+    ObjectSetInteger(0, conf_name, OBJPROP_SELECTED, 0);
+    ObjectSetInteger(0, conf_name, OBJPROP_BACK, 0);
+    
+    // Refresh the chart
+    ChartRedraw(0);
 }
