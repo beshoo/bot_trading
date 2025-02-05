@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                     TwoWayHedgingEA - Technical Documentation        |
 #property copyright "Telegram: @deep2trade"
-#property version   "2.00"
+#property version   "2.04"
 #property description "Deep2Trade is a cutting-edge Forex trading bot that employs a sophisticated Martingale strategy alongside robust risk management.\n"\
                      "Using technical analysis and dynamic stop loss methods, it fine-tunes trade entries and exits.\n"\
                      "Perfect for beginners and experts, it targets up to 79% profit potential."
@@ -376,6 +376,35 @@ DETAILED FUNCTIONALITY:
     * Point value adjustments
     * Broker-specific digit handling
     * Symbol-specific volume constraints
+
+12. Deleted Trade Handling:
+    * Phase 2 Deleted Trade Recovery:
+      - Tracks last scale price via g_lastScalePrice
+      - Allows immediate scaling when price returns to deleted trade level
+      - Uses 1-point tolerance for deleted trade position matching
+      - Resets tracking after successful recovery scale
+    * Scale Price Management:
+      - Normal scaling requires full FixedDistance movement
+      - Deleted trade recovery ignores FixedDistance requirement
+      - Prevents duplicate scaling at recovery points
+      - Maintains proper volume progression after deletion
+
+    * Recovery Process:
+      1. Last trade deletion detected
+      2. Position stored in g_lastScalePrice
+      3. When price returns to stored position (±1 point):
+         - Allows immediate scaling
+         - Resets g_lastScalePrice
+         - Continues normal scaling after recovery
+      4. If price moves beyond stored position:
+         - Returns to normal scaling rules
+         - Requires full FixedDistance for next scale
+
+    * Scale Verification:
+      - Normal scales: Requires full FixedDistance movement
+      - Recovery scales: Only requires proximity to deleted position
+      - All scales: Maintains proper volume progression
+      - All scales: Follows directional requirements
 
 DEVELOPMENT CONSIDERATIONS:
 1. TP Management Priority:
@@ -1674,16 +1703,16 @@ bool ShouldScaleIn(ulong ticket)
 {
     // Add static variables for tracking last scale attempt
     static datetime lastScaleAttempt = 0;
-    static double lastScalePrice = 0;
+    
+    // Remove the static lastScalePrice since we're using g_lastScalePrice globally
     
     // Check if money errors have been logged
     if(g_noMoneyErrorLogged)
         return false;
         
     // Change delay from 5 seconds to 500ms
-    if(TimeCurrent() - lastScaleAttempt < 1)  // Changed from 5 to 1 second for datetime comparison
+    if(TimeCurrent() - lastScaleAttempt < 1)
     {
-        // For more precise timing, check milliseconds
         if(GetTickCount() - (lastScaleAttempt * 1000) < 500)  // 500ms delay
             return false;
     }
@@ -1707,13 +1736,14 @@ bool ShouldScaleIn(ulong ticket)
     if(TimeCurrent() - lastLogTime >= 60)
     {
         LogAction("Movement :", StringFormat(
-            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
+            "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f | LastScalePrice: %.2f",
             g_lastTradeVolume,
             (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
             priceMove,
             FixedDistance,
             lastTradePrice,
-            currentPrice
+            currentPrice,
+            g_lastScalePrice
         ));
         lastLogTime = TimeCurrent();
     }
@@ -1724,8 +1754,21 @@ bool ShouldScaleIn(ulong ticket)
                       
     bool distanceOk = MathAbs(priceMove) >= FixedDistance;
     
+    // Add check for deleted last trade scenario
+    if(g_lastScalePrice != 0)
+    {
+        double moveFromLastScale = CalculatePointDifference(_Symbol, g_lastScalePrice, currentPrice);
+        // If we're near the last scale price (within 1 point), allow scaling
+        if(MathAbs(moveFromLastScale) <= 1)
+        {
+            LogAction("Scale Trigger", "Allowing scale at previous scale price after trade deletion");
+            g_lastScalePrice = 0;  // Reset the last scale price to allow the scale
+            distanceOk = true;  // Force the distance check to pass
+        }
+    }
+    
     // Only update last scale attempt if we're actually going to scale
-    if(directionOk && distanceOk)  // This is equivalent to if(MathAbs(priceMove) >= FixedDistance && directionOk)
+    if(directionOk && distanceOk)
     {
         // Add a small delay and recheck price to ensure stability
         Sleep(200);  // 200ms delay
@@ -1737,22 +1780,14 @@ bool ShouldScaleIn(ulong ticket)
         double verifyMove = CalculatePointDifference(_Symbol, lastTradePrice, verifyPrice);
         
         // Verify the price movement is still valid after delay
-        if(MathAbs(verifyMove) < FixedDistance)
+        if(MathAbs(verifyMove) < FixedDistance && g_lastScalePrice == 0)  // Only check if not at previous scale price
         {
             LogAction("Scale Verification", "Price movement no longer valid after delay check");
             return false;
         }
         
-        // Prevent scaling if price hasn't moved enough from last scale price
-        if(lastScalePrice != 0)
-        {
-            double moveFromLastScale = CalculatePointDifference(_Symbol, lastScalePrice, currentPrice);
-            if(MathAbs(moveFromLastScale) < FixedDistance)
-                return false;
-        }
-        
         lastScaleAttempt = TimeCurrent();
-        lastScalePrice = currentPrice;
+        g_lastScalePrice = currentPrice;  // Update the global last scale price
         
         // Optional logging for scale condition met
         LogAction("Scale Condition Met", StringFormat(
