@@ -1298,11 +1298,10 @@ string SendToGPT(string analysis) {
     StringReplace(escaped_analysis, "\r", "\\r");
     
 	string system_request = 
-  "You are an advanced AI Forex trading analyst with predictive capabilities. Analyze the market using support and resistance levels. "
+  "You are an advanced AI Forex indicator analyst with predictive capabilities. Analyze the market using support and resistance levels. "
  " and make your decision base on technical indicators and pattern recognition to identify optimal trading opportunities.\n\n"
- "IMPORTANT: Base on today news , you have to do user sentiment analysis to understand users trends and that has to affect your anlasys desesion \n\n "
-
- "Analyze the provided Japanese candlestick chart using the Inner Circle Trading (ICT) methodology is plus. \n"
+ "Analyze the provided Japanese candlestick chart using the Inner Circle Trading (ICT) methodology is plus. we \n"
+ "Your answer will used and indicator  on the chart we are using 30M time frame to show the mark on the chart"
 
 /*
 "=== EMA & BOLLINGER BANDS CROSSOVER STRATEGY ===\n\n"
@@ -1324,7 +1323,7 @@ string SendToGPT(string analysis) {
 "- IMPORTANT: Wait for candle close to confirm the setup.\n\n"
 "- Timeframe: 1-hour\n\n"
 */
-
+/*
 "### Risk Managment ####\n"
 
 "## Stop Loss and Take Profet:\n"
@@ -1358,8 +1357,9 @@ string SendToGPT(string analysis) {
 "- Check BB expansion/contraction\n"
 "- Monitor market volatility\n"
 //"- Support your decision by checking crosover of EMA 20,50 , please note It is crucial for the EMA to **start crossing** at this moment on last 3 candelas 1 hour time frame , **not after the crossover has already happened**"
-    
+   
     "Important: 2 or more conditions must be met to complete the trade, otherwise HOLD the trade.  \n\n"
+    */ 
     "IMPORTANT:  Respond ONLY with a single JSON object (no code blocks). The JSON must contain the following fields:\n\n"
     "- \"trade_signal\": \"BUY\", \"SELL\", or \"HOLD\"\n"
     "- \"entry_type\": \"IMMEDIATE\", \"LIMIT\", or \"FLAT\" (if market is flat)\n"
@@ -4398,13 +4398,13 @@ void DrawSignal(string signal, int confidence, double price, datetime time) {
         arrow_code = 233;  // Up arrow symbol
         arrow_color = ARROW_COLOR_BUY;
         // Place arrow below the low price with offset
-        arrow_price = iLow(_Symbol, PERIOD_CURRENT, 0) - (20 * Point());
+        arrow_price = iLow(_Symbol, PERIOD_CURRENT, 0) - (60 * Point());
     }
     else if(signal == "SELL") {
         arrow_code = 234;  // Down arrow symbol
         arrow_color = ARROW_COLOR_SELL;
         // Place arrow above the high price with offset
-        arrow_price = iHigh(_Symbol, PERIOD_CURRENT, 0) + (20 * Point());
+        arrow_price = iHigh(_Symbol, PERIOD_CURRENT, 0) + (60 * Point());
     }
     else {  // HOLD
         arrow_code = 251;  // Circle symbol

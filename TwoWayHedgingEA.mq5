@@ -1701,16 +1701,14 @@ double CalculatePointDifference(const string symbol, double price1, double price
 //+------------------------------------------------------------------+
 bool ShouldScaleIn(ulong ticket)
 {
-    // Add static variables for tracking last scale attempt
+    // Track last scale attempt timing
     static datetime lastScaleAttempt = 0;
-    
-    // Remove the static lastScalePrice since we're using g_lastScalePrice globally
     
     // Check if money errors have been logged
     if(g_noMoneyErrorLogged)
         return false;
         
-    // Change delay from 5 seconds to 500ms
+    // Implement minimum delay between scale attempts
     if(TimeCurrent() - lastScaleAttempt < 1)
     {
         if(GetTickCount() - (lastScaleAttempt * 1000) < 500)  // 500ms delay
@@ -1720,18 +1718,16 @@ bool ShouldScaleIn(ulong ticket)
     if(!PositionSelectByTicket(ticket))
         return false;
         
-    // Retrieve the order type and last trade's open price
+    // Get trade details and current market price
     ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
     double lastTradePrice = PositionGetDouble(POSITION_PRICE_OPEN);
-    
-    // For BUY positions use the Bid, for SELL positions use the Ask
     double currentPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                   : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     
-    // Calculate the price move in points using our generic function
+    // Calculate price movement in points
     double priceMove = CalculatePointDifference(_Symbol, lastTradePrice, currentPrice);
     
-    // Log movement details every 60 seconds (optional)
+    // Log movement details periodically
     static datetime lastLogTime = 0;
     if(TimeCurrent() - lastLogTime >= 60)
     {
@@ -1748,48 +1744,44 @@ bool ShouldScaleIn(ulong ticket)
         lastLogTime = TimeCurrent();
     }
     
-    // Check direction and required distance
+    // Validate price movement direction and distance
     bool directionOk = (type == ORDER_TYPE_BUY && currentPrice < lastTradePrice) ||
                       (type == ORDER_TYPE_SELL && currentPrice > lastTradePrice);
-                      
     bool distanceOk = MathAbs(priceMove) >= FixedDistance;
     
-    // Add check for deleted last trade scenario
+    // Check for deleted trade recovery scenario
     if(g_lastScalePrice != 0)
     {
         double moveFromLastScale = CalculatePointDifference(_Symbol, g_lastScalePrice, currentPrice);
-        // If we're near the last scale price (within 1 point), allow scaling
         if(MathAbs(moveFromLastScale) <= 1)
         {
             LogAction("Scale Trigger", "Allowing scale at previous scale price after trade deletion");
-            g_lastScalePrice = 0;  // Reset the last scale price to allow the scale
-            distanceOk = true;  // Force the distance check to pass
+            g_lastScalePrice = 0;
+            distanceOk = true;
         }
     }
     
-    // Only update last scale attempt if we're actually going to scale
+    // Verify scaling conditions
     if(directionOk && distanceOk)
     {
-        // Add a small delay and recheck price to ensure stability
-        Sleep(200);  // 200ms delay
+        Sleep(200);  // Price stability check delay
         
         // Recheck price after delay
         double verifyPrice = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                      : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        
         double verifyMove = CalculatePointDifference(_Symbol, lastTradePrice, verifyPrice);
         
-        // Verify the price movement is still valid after delay
-        if(MathAbs(verifyMove) < FixedDistance && g_lastScalePrice == 0)  // Only check if not at previous scale price
+        // Validate price movement after delay
+        if(MathAbs(verifyMove) < FixedDistance && g_lastScalePrice == 0)
         {
             LogAction("Scale Verification", "Price movement no longer valid after delay check");
             return false;
         }
         
         lastScaleAttempt = TimeCurrent();
-        g_lastScalePrice = currentPrice;  // Update the global last scale price
+        g_lastScalePrice = currentPrice;
         
-        // Optional logging for scale condition met
+        // Log scale conditions
         LogAction("Scale Condition Met", StringFormat(
             "Vol: %.2f | Type: %s | Move: %.1f | Req: %d | LastPrice: %.2f | Current: %.2f",
             g_lastTradeVolume,
@@ -1800,7 +1792,7 @@ bool ShouldScaleIn(ulong ticket)
             currentPrice
         ));
         
-        // Calculate the new volume (using ScalePercent)
+        // Calculate and validate new trade volume
         double newVolume = NormalizeDouble(g_lastTradeVolume * ((100 + ScalePercent) / 100.0), 2);
         LogAction("Volume Calculation", StringFormat(
             "PositionID: %d, LastVolume: %.2f, ScalePercent: %d, NewVolume: %.2f",
@@ -1964,6 +1956,13 @@ void ForceTPSync()
     
     if(totalTrades == 0)
         return;
+    
+    // Skip TP sync if we're down to a single trade after deletion
+    if(totalTrades == 1 && !g_inPhase1)
+    {
+        LogAction("TP Sync Skipped", "Single trade remaining after deletion in Phase 2");
+        return;
+    }
     
     // Get current last trade
     ulong lastTicket = GetLastTradeTicket();
